@@ -1,9 +1,14 @@
 use std::{
     env,
     net::{IpAddr, SocketAddr},
+    sync::Arc,
 };
 
-use tokio::net::UdpSocket;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::Mutex,
+};
 use wincode::{SchemaRead, SchemaWrite};
 
 mod block;
@@ -32,7 +37,8 @@ async fn main() {
             port: root_port,
         });
     }
-    let sock = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+
+    let sock = TcpListener::bind("0.0.0.0:0").await.unwrap();
     let local_addr = sock.local_addr().unwrap();
     let ip = local_addr.ip();
     let ip_string = ip.to_string();
@@ -40,38 +46,63 @@ async fn main() {
     println!("IP: {}, Port: {}", ip_string, port);
 
     let me = Peer { ip: ip, port: port };
-    let mut known_peers = vec![me];
+    let known_peers = Arc::new(Mutex::new(vec![me]));
 
-    let mut buff = [0; 1024];
     if root_peer.is_some() {
         let root_peer = root_peer.unwrap();
-        let addr = SocketAddr::new(root_peer.ip, root_peer.port);
-        let discovery_req = NetworkMessage::PeerDiscoveryReq(me);
-        let discovery_req_bytes =
-            wincode::serialize(&discovery_req).expect("Error while serializing discovery request");
-        sock.send_to(&discovery_req_bytes, addr)
-            .await
-            .expect("Error sending init packet");
+        send_packet(&root_peer, NetworkMessage::PeerDiscoveryReq(me)).await;
     }
-    loop {
-        let (_len, addr) = sock.recv_from(&mut buff).await.unwrap();
-        let req: NetworkMessage =
-            wincode::deserialize(&buff).expect("Error while deserializing peer address");
 
-        match req {
-            NetworkMessage::PeerDiscoveryReq(peer) => {
-                known_peers.push(peer);
-                let res = NetworkMessage::PeerDiscoveryRes(known_peers.clone());
-                let res_bytes =
-                    wincode::serialize(&res).expect("Error while serializing discovery response");
-                sock.send_to(&res_bytes, addr)
-                    .await
-                    .expect("Error while responding to peer discovery");
+    let mut buff = [0; 1024];
+    loop {
+        println!("Waiting for connection...");
+        let (mut stream, _addr) = sock.accept().await.unwrap();
+        println!("Connection Received");
+        let known_peers = known_peers.clone();
+        tokio::spawn(async move {
+            stream.readable().await.unwrap();
+            println!("Stream Readable");
+            stream.read(&mut buff).await.unwrap();
+            let req: NetworkMessage =
+                wincode::deserialize(&buff).expect("Error while deserializing peer address");
+            match req {
+                NetworkMessage::PeerDiscoveryReq(peer) => {
+                    println!("OBTAINING KNOWN PEERS LOCK");
+                    let mut known_peers = known_peers.lock().await;
+                    println!("OBTAINED KNOWN PEERS LOCK");
+                    if !peer_exists(&known_peers, &peer) {
+                        known_peers.push(peer.clone());
+                    }
+                    send_packet(&peer, NetworkMessage::PeerDiscoveryRes(known_peers.clone())).await;
+                    println!("Discovery response sent");
+                }
+                NetworkMessage::PeerDiscoveryRes(peers) => {
+                    println!("Received discovery response");
+                    println!("OBTAINING KNOWN PEERS LOCK");
+                    let mut known_peers = known_peers.lock().await;
+                    println!("OBTAINED KNOWN PEERS LOCK");
+                    for peer in peers {
+                        if !peer_exists(&known_peers, &peer) {
+                            known_peers.push(peer);
+                        }
+                    }
+                    println!("PEERS LIST: {:?}", known_peers);
+                }
             }
-            NetworkMessage::PeerDiscoveryRes(peers) => {
-                known_peers.append(&mut peers.clone());
-                println!("PEERS LIST: {:?}", known_peers);
-            }
-        }
+        });
     }
+}
+
+async fn send_packet(remote_peer: &Peer, packet: NetworkMessage) -> usize {
+    let mut stream = TcpStream::connect(SocketAddr::new(remote_peer.ip, remote_peer.port))
+        .await
+        .unwrap();
+    let message_bytes = wincode::serialize(&packet).expect("Error serializing packet");
+    stream.write(&message_bytes).await.unwrap()
+}
+
+fn peer_exists(known_peers: &[Peer], peer: &Peer) -> bool {
+    known_peers
+        .iter()
+        .any(|p| p.ip == peer.ip && p.port == peer.port)
 }
