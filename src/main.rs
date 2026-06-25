@@ -11,26 +11,20 @@ use tokio::{
     net::{TcpListener, TcpStream},
     select,
     sync::{Mutex, mpsc},
+    task::JoinHandle,
+    time::Sleep,
 };
-use tokio_util::sync::CancellationToken;
 use wincode::{SchemaRead, SchemaWrite};
 
 mod block;
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct HeartbeatState {
-    count: u32,
-    res: u32,
-}
 
 #[derive(Debug)]
 struct Peer {
     ip: IpAddr,
     port: u16,
-    heartbeat_cancel_token: Option<CancellationToken>,
-    heartbeat_state: Arc<Mutex<HeartbeatState>>,
     // TODO use peer id instead?
     drop_signal_sender: mpsc::Sender<PeerSerializable>,
+    heartbeat_handle: Option<JoinHandle<()>>,
 }
 
 impl Peer {
@@ -38,9 +32,8 @@ impl Peer {
         let obj = Self {
             ip,
             port,
-            heartbeat_cancel_token: None,
-            heartbeat_state: Arc::new(Mutex::new(HeartbeatState::default())),
             drop_signal_sender,
+            heartbeat_handle: None,
         };
         return obj;
     }
@@ -51,49 +44,66 @@ impl Peer {
         Self {
             ip: serializable.ip,
             port: serializable.port,
-            heartbeat_cancel_token: None,
-            heartbeat_state: Arc::new(Mutex::new(HeartbeatState::default())),
             drop_signal_sender,
+            heartbeat_handle: None,
         }
     }
     // Will stop automatically when dropped
     fn init_heartbeat(&mut self, self_peer: PeerSerializable) {
-        if self.heartbeat_cancel_token.is_some() {
+        if self.heartbeat_handle.is_some() {
             return;
         }
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        let drop_signal_sender = self.drop_signal_sender.clone();
         let serialized = PeerSerializable {
             ip: self.ip,
             port: self.port,
         };
-        let token = CancellationToken::new();
-        let cloned_token = token.clone();
-
-        let heartbeat_state = self.heartbeat_state.clone();
-        let drop_signal_sender = self.drop_signal_sender.clone();
-        let _jh = tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
+            let mut counter = 1;
             loop {
+                timeout().await;
+                let stream = open_stream(&serialized).await;
+                if stream.is_err() {
+                    drop_signal_sender.clone().send(serialized).await.unwrap();
+                    break;
+                }
+                let mut stream = stream.unwrap();
+                let m = send_packet(
+                    &mut stream,
+                    NetworkMessage::HeartbeatReq((self_peer, counter)),
+                )
+                .await;
+                counter = counter + 1;
+                if m.is_err() {
+                    drop_signal_sender.clone().send(serialized).await.unwrap();
+                    break;
+                }
+
                 select! {
-                    _ = async
-                    {
-                        {interval.tick().await;}
-                        } => {
-                            let mut heartbeat_state = heartbeat_state.lock().await;
-                            if heartbeat_state.count == heartbeat_state.res{
-                                let m = send_packet(&serialized, NetworkMessage::HeartbeatReq((self_peer,heartbeat_state.count))).await;
-                                if m.is_err(){
-                                    drop_signal_sender.clone().send(serialized).await.unwrap();
-                                }
-                                heartbeat_state.count = heartbeat_state.count + 1;
-                            }else{
-                                drop_signal_sender.send(serialized).await.expect("Error sending drop signal");
-                            }
-                        }
-                    _ = cloned_token.cancelled() => {break}
+                    _ = stream.readable() => {let mut buff = [0; 1024];
+                stream
+                    .read(&mut buff)
+                    .await
+                    .expect("Error reading response stream");
+                let response = wincode::deserialize::<NetworkMessage>(&buff)
+                    .expect("Error deserializing response");
+                match response {
+                    NetworkMessage::HeartbeatRes(_) => {
+                        continue;
+                    }
+                    _ => {
+                        drop_signal_sender.clone().send(serialized).await.unwrap();
+                        break;
+                    }
+                };}
+                    _ = timeout() => {
+                        drop_signal_sender.clone().send(serialized).await.unwrap();
+                        break;
+                    }
                 }
             }
         });
-        self.heartbeat_cancel_token = Some(token);
+        self.heartbeat_handle = Some(handle);
     }
 }
 
@@ -101,8 +111,8 @@ impl Drop for Peer {
     // When dropped cancel the heartbeat
     fn drop(&mut self) {
         println!("Executing drop");
-        match &self.heartbeat_cancel_token {
-            Some(t) => t.cancel(),
+        match &self.heartbeat_handle {
+            Some(h) => h.abort(),
             None => {}
         };
     }
@@ -180,12 +190,40 @@ async fn main() {
     if root_peer.is_some() {
         let root_peer = root_peer.unwrap();
         let root_peer_serialized = root_peer.into();
-        send_packet(
-            &root_peer_serialized,
-            NetworkMessage::PeerDiscoveryReq(me_serialized),
-        )
-        .await
-        .expect("Error in root peer discovery");
+        let stream = open_stream(&root_peer_serialized).await;
+        let known_peers = known_peers.clone();
+        if stream.is_ok() {
+            let mut stream = stream.unwrap();
+            send_packet(&mut stream, NetworkMessage::PeerDiscoveryReq(me_serialized))
+                .await
+                .expect("Error in root peer discovery");
+            select! {
+                _ = timeout() => {}
+                _ = stream.readable() => {
+                    let mut buff = [0; 1024];
+                    stream.read(&mut buff).await.expect("Error reading response");
+                    let msg = wincode::deserialize::<NetworkMessage>(&buff).expect("Invalid packet received");
+                    match msg {
+                        NetworkMessage::PeerDiscoveryRes(peers) => {
+                            let mut known_peers = known_peers.lock().await;
+                            for peer in peers {
+                                if !peer_exists(&known_peers, &peer) {
+                                    let mut new_peer: Peer =
+                                        Peer::from_serializable(peer, peer_drop_signal_sender.clone());
+                                    new_peer.init_heartbeat(me_serialized);
+                                    known_peers.push(new_peer);
+                                }
+                            }
+                        }
+                        _ => {
+                            panic!("UNSUPPORTED RESPONSE FOR PEER DISCOVERY")
+                        }
+                    }
+                }
+            }
+        } else {
+            panic!("Could not connect with root peer")
+        }
     }
     let known_peers_c = known_peers.clone();
     tokio::spawn(async move {
@@ -229,28 +267,18 @@ async fn main() {
                         .iter()
                         .map(Into::<PeerSerializable>::into)
                         .collect();
-                    let m = send_packet(&peer, NetworkMessage::PeerDiscoveryRes(sv)).await;
+                    let m = send_packet(&mut stream, NetworkMessage::PeerDiscoveryRes(sv)).await;
                     if m.is_err() {
                         peer_drop_signal_sender.clone().send(peer).await.unwrap();
                     }
                     println!("Discovery response sent");
                 }
-                NetworkMessage::PeerDiscoveryRes(peers) => {
-                    let mut known_peers = known_peers_c.lock().await;
-                    for peer in peers {
-                        if !peer_exists(&known_peers, &peer) {
-                            let mut new_peer: Peer =
-                                Peer::from_serializable(peer, peer_drop_signal_sender.clone());
-                            new_peer.init_heartbeat(me_serialized);
-                            known_peers.push(new_peer);
-                        }
-                    }
-                }
+                NetworkMessage::PeerDiscoveryRes(_) => {}
                 NetworkMessage::HeartbeatReq((peer, req)) => {
                     println!("Received Heartbeat req from {:#?} , {req}", peer);
                     tokio::time::sleep(Duration::new(req as u64, 0)).await;
                     let m = send_packet(
-                        &peer,
+                        &mut stream,
                         NetworkMessage::HeartbeatRes((me_serialized, req + 1)),
                     )
                     .await;
@@ -258,26 +286,27 @@ async fn main() {
                         peer_drop_signal_sender.clone().send(peer).await.unwrap();
                     }
                 }
-                NetworkMessage::HeartbeatRes((peer, res)) => {
-                    println!("Sending Heartbeat res to {:#?}, {res}", peer);
-                    let known_peers = known_peers_c.lock().await;
-                    for kp in known_peers.iter() {
-                        if *kp == peer {
-                            let mut heartbeat_state = kp.heartbeat_state.lock().await;
-                            heartbeat_state.res = res;
-                        }
-                    }
-                }
+                NetworkMessage::HeartbeatRes(_) => {}
             }
         });
     }
 }
 
+fn timeout() -> Sleep {
+    return tokio::time::sleep(Duration::new(5, 0));
+}
+
+async fn open_stream(remote_peer: &PeerSerializable) -> Result<TcpStream, Error> {
+    let stream = TcpStream::connect(SocketAddr::new(remote_peer.ip, remote_peer.port)).await?;
+    return Ok(stream);
+}
+
 async fn send_packet(
-    remote_peer: &PeerSerializable,
+    // remote_peer: &PeerSerializable,
+    stream: &mut TcpStream,
     packet: NetworkMessage,
 ) -> Result<usize, Error> {
-    let mut stream = TcpStream::connect(SocketAddr::new(remote_peer.ip, remote_peer.port)).await?;
+    // let mut stream = TcpStream::connect(SocketAddr::new(remote_peer.ip, remote_peer.port)).await?;
     let message_bytes = wincode::serialize(&packet).expect("Error serializing packet");
     let p = stream.write(&message_bytes).await;
     return p;
