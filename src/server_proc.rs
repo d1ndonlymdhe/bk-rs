@@ -7,7 +7,8 @@ use tokio::{
 };
 
 use crate::{
-    types::{NetworkMessage, Peer, PeerSerializable},
+    block::Block,
+    types::{SyncResMessage, NetworkMessage, Peer, PeerSerializable},
     utils::{peer_exists, send_packet},
 };
 
@@ -16,6 +17,7 @@ pub async fn server_process(
     peer_addr: SocketAddr,
     known_peers: Arc<Mutex<Vec<Peer>>>,
     peer_drop_signal_sender: mpsc::Sender<(PeerSerializable, String)>,
+    chain: Arc<Mutex<Vec<Block>>>,
 ) {
     let mut buff = [0; 1024];
     stream.readable().await.unwrap();
@@ -24,16 +26,18 @@ pub async fn server_process(
         wincode::deserialize(&buff).expect("Error while deserializing peer address");
     match req {
         NetworkMessage::PeerDiscoveryReq(peer_serializable) => {
-            let mut known_peers = known_peers.lock().await;
+            let mut known_peers_lock = known_peers.lock().await;
             let peer = PeerSerializable::from(peer_serializable);
-            if !peer_exists(&known_peers, &(peer).into()) {
+            let self_peer = PeerSerializable::from(peer_addr);
+            if peer != self_peer && !peer_exists(&known_peers_lock, &(peer).into()) {
                 let mut new_peer: Peer =
-                    Peer::from_serializable(peer, peer_drop_signal_sender.clone());
-                new_peer.init_heartbeat();
-                known_peers.push(new_peer);
+                    Peer::from_serializable(peer, peer_drop_signal_sender.clone(), chain.clone());
+
+                new_peer.init_heartbeat(known_peers.clone(), chain);
+                known_peers_lock.push(new_peer);
             }
 
-            let sv = known_peers
+            let sv = known_peers_lock
                 .iter()
                 .map(Into::<PeerSerializable>::into)
                 .collect();
@@ -41,11 +45,29 @@ pub async fn server_process(
             println!("Discovery response sent");
         }
         NetworkMessage::PeerDiscoveryRes(_) => {}
-        NetworkMessage::HeartbeatReq => {
+        NetworkMessage::SyncReq => {
             let peer = PeerSerializable::from(peer_addr);
-            println!("Received Heartbeat req from {:#?}", peer,);
-            let _m = send_packet(stream, NetworkMessage::HeartbeatRes).await;
+            println!("Received Sync Req req from {:#?}", peer,);
+            let last_block = chain.lock().await.clone().into_iter().last();
+            let known_peers = known_peers.lock().await;
+            let known_peers_serialized = known_peers
+                .iter()
+                .map(|kp| {
+                    return PeerSerializable {
+                        ip: kp.ip,
+                        port: kp.port,
+                    };
+                })
+                .collect();
+            let _m = send_packet(
+                stream,
+                NetworkMessage::SyncRes(SyncResMessage {
+                    last_block: last_block,
+                    peers: known_peers_serialized,
+                }),
+            )
+            .await;
         }
-        NetworkMessage::HeartbeatRes => {}
+        NetworkMessage::SyncRes(_) => {}
     }
 }

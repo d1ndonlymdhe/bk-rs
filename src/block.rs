@@ -1,11 +1,9 @@
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use wincode::{SchemaRead, SchemaWrite};
+use enum_iterator::{Sequence};
 
-const DIFFICULTY: usize = 20;
-
-
-
+const DIFFICULTY: usize = 25;
 fn check_leading_zeroes(hash: &[u8], difficulty: usize) -> bool {
     let full_bytes = difficulty / 8;
     let remaining_bits = difficulty % 8;
@@ -24,7 +22,7 @@ fn check_leading_zeroes(hash: &[u8], difficulty: usize) -> bool {
     return true;
 }
 
-#[derive(SchemaWrite, SchemaRead, PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(SchemaWrite, SchemaRead, PartialEq, Eq, Clone, Copy, Debug,Sequence)]
 pub enum Candidate {
     A,
     B,
@@ -63,6 +61,7 @@ impl Block {
         return block;
     }
     pub fn hash(&mut self) {
+        println!("HASH FUNC");
         self.hash = vec![];
         self.nonce = None;
         let p = wincode::serialize(self).expect("Error while serializing block");

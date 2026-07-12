@@ -1,9 +1,18 @@
-use std::net::{IpAddr, SocketAddr};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{Mutex, mpsc},
+    task::JoinHandle,
+};
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::utils::{NetError, open_stream, send_packet_and_wait, timeout};
+use crate::{
+    block::Block,
+    utils::{NetError, open_stream, peer_exists, send_packet_and_wait, timeout},
+};
 
 #[derive(Debug)]
 pub struct Peer {
@@ -12,6 +21,13 @@ pub struct Peer {
     // TODO use peer id instead?
     pub drop_signal_sender: mpsc::Sender<(PeerSerializable, String)>,
     pub heartbeat_handle: Option<JoinHandle<()>>,
+    pub chain: Arc<Mutex<Vec<Block>>>,
+}
+
+#[derive(Debug, Clone, SchemaRead, SchemaWrite)]
+pub struct SyncResMessage {
+    pub peers: Vec<PeerSerializable>,
+    pub last_block: Option<Block>,
 }
 
 impl Peer {
@@ -19,28 +35,36 @@ impl Peer {
         ip: IpAddr,
         port: u16,
         drop_signal_sender: mpsc::Sender<(PeerSerializable, String)>,
+        chain: Arc<Mutex<Vec<Block>>>,
     ) -> Self {
         let obj = Self {
             ip,
             port,
             drop_signal_sender,
             heartbeat_handle: None,
+            chain,
         };
         return obj;
     }
     pub fn from_serializable(
         serializable: PeerSerializable,
         drop_signal_sender: mpsc::Sender<(PeerSerializable, String)>,
+        chain: Arc<Mutex<Vec<Block>>>,
     ) -> Self {
         Self {
             ip: serializable.ip,
             port: serializable.port,
             drop_signal_sender,
             heartbeat_handle: None,
+            chain,
         }
     }
     // Will stop automatically when dropped
-    pub fn init_heartbeat(&mut self) {
+    pub fn init_heartbeat(
+        &mut self,
+        known_peers: Arc<Mutex<Vec<Peer>>>,
+        chain: Arc<Mutex<Vec<Block>>>,
+    ) {
         if self.heartbeat_handle.is_some() {
             return;
         }
@@ -64,11 +88,49 @@ impl Peer {
                 }
                 let mut stream = stream.unwrap();
 
-                let m = send_packet_and_wait(&mut stream, NetworkMessage::HeartbeatReq).await;
+                println!("Sending Sync message to {}", self_serialized.port);
+
+                let m = send_packet_and_wait(&mut stream, NetworkMessage::SyncReq).await;
 
                 match m {
                     Ok(res) => match res {
-                        NetworkMessage::HeartbeatRes => {
+                        NetworkMessage::SyncRes(heartbeat_message) => {
+                            let SyncResMessage { last_block, peers } = heartbeat_message;
+                            let mut chain_lock = chain.lock().await;
+                            // let mut known_peers = known_peers.lock().await;
+
+                            if let Some(block) = last_block {
+                                if block.idx == chain_lock.len() {
+                                    let current_last = chain_lock.last();
+                                    if current_last.is_some() {
+                                        let current_last = current_last.unwrap();
+                                        // TODO: add complete validation logic
+                                        if block.prev_hash == current_last.hash {
+                                            chain_lock.push(block);
+                                        }
+                                    }
+                                }
+                            }
+                            let known_peers_for_init = known_peers.clone();
+                            let mut known_peers_lock = known_peers.lock().await;
+                            for peer in peers {
+                                if peer != self_serialized && !peer_exists(&known_peers_lock, &peer)
+                                {
+                                    let mut new_peer = Peer::from_serializable(
+                                        peer,
+                                        drop_signal_sender.clone(),
+                                        chain.clone(),
+                                    );
+                                    drop(known_peers_lock);
+                                    new_peer.init_heartbeat(
+                                        known_peers_for_init.clone(),
+                                        chain.clone(),
+                                    );
+                                    known_peers_lock = known_peers.lock().await;
+                                    known_peers_lock.push(new_peer);
+                                }
+                            }
+
                             counter = counter + 1;
                             continue;
                         }
@@ -78,7 +140,7 @@ impl Peer {
                     },
                     Err(e) => {
                         println!(
-                            "Error occurred while waiting for heartbeat response {}",
+                            "Error occurred while waiting for Sync response {}",
                             match e {
                                 NetError::IoError(_) => "IO ERROR",
                                 NetError::Timeout => "Timeout",
@@ -86,10 +148,7 @@ impl Peer {
                         );
                         drop_signal_sender
                             .clone()
-                            .send((
-                                self_serialized,
-                                "Failed to receive heartbeat response".into(),
-                            ))
+                            .send((self_serialized, "Failed to receive Sync response".into()))
                             .await
                             .unwrap();
                         break;
@@ -106,7 +165,10 @@ impl Drop for Peer {
     fn drop(&mut self) {
         println!("Executing drop");
         match &self.heartbeat_handle {
-            Some(h) => h.abort(),
+            Some(h) => {
+                println!("{} {}", self.ip, self.port);
+                h.abort();
+            }
             None => {}
         };
     }
@@ -120,7 +182,6 @@ impl Into<PeerSerializable> for &Peer {
         };
     }
 }
-
 
 impl PartialEq<PeerSerializable> for Peer {
     fn eq(&self, other: &PeerSerializable) -> bool {
@@ -153,6 +214,6 @@ impl From<SocketAddr> for PeerSerializable {
 pub enum NetworkMessage {
     PeerDiscoveryReq(PeerSerializable),
     PeerDiscoveryRes(Vec<PeerSerializable>),
-    HeartbeatReq,
-    HeartbeatRes,
+    SyncReq,
+    SyncRes(SyncResMessage),
 }
