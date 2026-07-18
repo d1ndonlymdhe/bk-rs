@@ -8,8 +8,10 @@ use tokio::{
 
 use crate::{
     block::Block,
-    types::{SyncResMessage, NetworkMessage, Peer, PeerSerializable},
-    utils::{peer_exists, send_packet},
+    network_message::{NetworkMessageReq, NetworkMessageRes, SyncResMessage},
+    peer::{Peer, peer_exists},
+    peer_serializable::PeerSerializable,
+    utils::send_packet_res,
 };
 
 pub async fn server_process(
@@ -22,10 +24,10 @@ pub async fn server_process(
     let mut buff = [0; 1024];
     stream.readable().await.unwrap();
     stream.read(&mut buff).await.unwrap();
-    let req: NetworkMessage =
+    let req: NetworkMessageReq =
         wincode::deserialize(&buff).expect("Error while deserializing peer address");
     match req {
-        NetworkMessage::PeerDiscoveryReq(peer_serializable) => {
+        NetworkMessageReq::PeerDiscoveryReq(peer_serializable) => {
             let mut known_peers_lock = known_peers.lock().await;
             let peer = PeerSerializable::from(peer_serializable);
             let self_peer = PeerSerializable::from(peer_addr);
@@ -33,7 +35,7 @@ pub async fn server_process(
                 let mut new_peer: Peer =
                     Peer::from_serializable(peer, peer_drop_signal_sender.clone(), chain.clone());
 
-                new_peer.init_heartbeat(known_peers.clone(), chain);
+                new_peer.init_sync(known_peers.clone(), chain);
                 known_peers_lock.push(new_peer);
             }
 
@@ -41,11 +43,10 @@ pub async fn server_process(
                 .iter()
                 .map(Into::<PeerSerializable>::into)
                 .collect();
-            let _m = send_packet(stream, NetworkMessage::PeerDiscoveryRes(sv)).await;
+            let _m = send_packet_res(stream, NetworkMessageRes::PeerDiscoveryRes(sv)).await;
             println!("Discovery response sent");
         }
-        NetworkMessage::PeerDiscoveryRes(_) => {}
-        NetworkMessage::SyncReq => {
+        NetworkMessageReq::SyncReq => {
             let peer = PeerSerializable::from(peer_addr);
             println!("Received Sync Req req from {:#?}", peer,);
             let last_block = chain.lock().await.clone().into_iter().last();
@@ -59,15 +60,22 @@ pub async fn server_process(
                     };
                 })
                 .collect();
-            let _m = send_packet(
+            let _m = send_packet_res(
                 stream,
-                NetworkMessage::SyncRes(SyncResMessage {
+                NetworkMessageRes::SyncRes(SyncResMessage {
                     last_block: last_block,
                     peers: known_peers_serialized,
                 }),
             )
             .await;
         }
-        NetworkMessage::SyncRes(_) => {}
+        NetworkMessageReq::FullChainReq => {
+            println!("RECEIVED FULL CHAIN REQ");
+            let chain_lock = chain.lock().await;
+            // Need to handle long message that may overflow the buffer
+            println!("SENDING FULL CHAIN RESPONSE");
+            let _m =
+                send_packet_res(stream, NetworkMessageRes::FullChainRes(chain_lock.clone())).await;
+        }
     }
 }

@@ -1,30 +1,33 @@
 use std::{env, sync::Arc};
-use std::fs;
 
 use tokio::{
     net::TcpListener,
     sync::{Mutex, mpsc},
 };
 
-use crate::{block::Block, randomizer::mine_random_block, server_proc::server_process};
 use crate::{
-    types::{NetworkMessage, Peer, PeerSerializable},
-    utils::{open_stream, peer_exists, send_packet_and_wait},
+    block::{Block, validate_chain_addition},
+    network_message::{NetworkMessageReq, NetworkMessageRes},
+    randomizer::mine_random_block,
+    server_proc::server_process,
+};
+use crate::{peer::Peer, peer_serializable::PeerSerializable, utils::save_chain_to_file};
+use crate::{
+    peer::peer_exists,
+    utils::{open_stream, send_packet_and_wait},
 };
 
 mod block;
+mod network_message;
+mod peer;
+mod peer_serializable;
 mod randomizer;
-mod randomizer_tests;
 mod server_proc;
-mod types;
 mod utils;
 
 fn save_chain(node_id: &str, chain: &Vec<Block>) -> std::io::Result<()> {
     let filename = format!("chain_{}.bin", node_id);
-    let serialized = wincode::serialize(chain).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Serialization error: {:?}", e))
-    })?;
-    fs::write(&filename, serialized)?;
+    let _ = save_chain_to_file(chain, &filename)?;
     println!("Chain saved to {} ({} blocks)", filename, chain.len());
     Ok(())
 }
@@ -33,17 +36,17 @@ fn save_chain(node_id: &str, chain: &Vec<Block>) -> std::io::Result<()> {
 async fn main() {
     let mut args = env::args();
     args.next(); // skip program name
-    
+
     let mut node_id = String::from("node_0");
     let mut root_peer_info = None;
-    
+
     // Parse arguments: first is node_id, then optional root IP and port
     let args_vec: Vec<String> = args.collect();
-    
+
     if args_vec.len() >= 1 {
         node_id = args_vec[0].clone();
     }
-    
+
     if args_vec.len() >= 3 {
         let root_ip = args_vec[1].clone();
         let root_port = args_vec[2].parse::<u16>().unwrap();
@@ -70,7 +73,7 @@ async fn main() {
             peer_drop_signal_sender.clone(),
             chain.clone(),
         );
-        p.init_heartbeat(known_peers.clone(), chain.clone());
+        p.init_sync(known_peers.clone(), chain.clone());
         let mut known_peers_lock = known_peers.lock().await;
         known_peers_lock.push(p);
     }
@@ -96,7 +99,18 @@ async fn main() {
             } else {
                 println!("Random block mined");
                 let mut chain = binding.lock().await;
-                chain.push(rand_block.unwrap().clone());
+                let rand_block = rand_block.unwrap();
+                match validate_chain_addition(&chain, &rand_block) {
+                    block::ValidateChainRes::RequestFullChain => {
+                        println!("GOT REQUEST FOR FULL CHAIN FROM SELF MINE: IGNORE");
+                    }
+                    block::ValidateChainRes::IgnoreBlock => {
+                        println!("Invalid block mined: Ignore")
+                    }
+                    block::ValidateChainRes::AddBlock => {
+                        chain.push(rand_block);
+                    }
+                }
             }
             // .unwrap();
         }
@@ -115,21 +129,22 @@ async fn main() {
                 port: root_peer.port,
             };
             drop(known_peers_lock);
-            
+
             let stream = open_stream(&root_peer_serialized).await;
             if stream.is_ok() {
                 let mut stream = stream.unwrap();
                 let res = send_packet_and_wait(
                     &mut stream,
-                    NetworkMessage::PeerDiscoveryReq(self_serialized),
+                    NetworkMessageReq::PeerDiscoveryReq(self_serialized),
                 )
                 .await;
                 match res {
                     Ok(msg) => match msg {
-                        NetworkMessage::PeerDiscoveryRes(peers) => {
+                        NetworkMessageRes::PeerDiscoveryRes(peers) => {
                             let mut known_peers_lock = known_peers.lock().await;
                             for peer in peers {
-                                if peer != self_serialized && !peer_exists(&known_peers_lock, &peer) {
+                                if peer != self_serialized && !peer_exists(&known_peers_lock, &peer)
+                                {
                                     let mut new_peer: Peer = Peer::from_serializable(
                                         peer,
                                         peer_drop_signal_sender.clone(),
@@ -137,7 +152,7 @@ async fn main() {
                                     );
                                     let hb_chain = chain.clone();
                                     let hb_peers = known_peers.clone();
-                                    new_peer.init_heartbeat(hb_peers, hb_chain);
+                                    new_peer.init_sync(hb_peers, hb_chain);
                                     known_peers_lock.push(new_peer);
                                 }
                             }
@@ -176,8 +191,10 @@ async fn main() {
     let chain_server_proc = chain.clone();
     println!("Starting server process");
 
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
-    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+    let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+    let mut sigint =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
     let chain_for_signal = chain.clone();
     let node_id_for_signal = node_id.clone();
 

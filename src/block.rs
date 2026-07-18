@@ -1,9 +1,9 @@
+use enum_iterator::Sequence;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use wincode::{SchemaRead, SchemaWrite};
-use enum_iterator::{Sequence};
 
-const DIFFICULTY: usize = 25;
+const DIFFICULTY: usize = 22;
 fn check_leading_zeroes(hash: &[u8], difficulty: usize) -> bool {
     let full_bytes = difficulty / 8;
     let remaining_bits = difficulty % 8;
@@ -22,7 +22,7 @@ fn check_leading_zeroes(hash: &[u8], difficulty: usize) -> bool {
     return true;
 }
 
-#[derive(SchemaWrite, SchemaRead, PartialEq, Eq, Clone, Copy, Debug,Sequence)]
+#[derive(SchemaWrite, SchemaRead, PartialEq, Eq, Clone, Copy, Debug, Sequence)]
 pub enum Candidate {
     A,
     B,
@@ -48,7 +48,99 @@ pub struct Block {
     pub hash: Vec<u8>,
 }
 
+pub fn validate_chain(new_blocks: &[Block], current_chain: &[Block]) -> bool {
+    if new_blocks.len() <= current_chain.len() {
+        return false;
+    }
+    let mut prev_block_hash = new_blocks[0].hash.clone();
+    for i in 1..new_blocks.len() {
+        if new_blocks[i].prev_hash != prev_block_hash {
+            return false;
+        }
+        if !Block::validate(&new_blocks[i]) {
+            return false;
+        }
+        prev_block_hash = new_blocks[i].hash.clone();
+    }
+    true
+}
+
+pub enum ValidateChainRes {
+    RequestFullChain,
+    IgnoreBlock,
+    AddBlock,
+}
+
+// Assumes that the provided chain itself is valid
+pub fn validate_chain_addition(current_chain: &[Block], new_block: &Block) -> ValidateChainRes {
+    if current_chain.is_empty() {
+        // Only try to add new block if it says it is the first block on the chain
+        if new_block.idx == 0 {
+            if Block::validate(new_block) {
+                return ValidateChainRes::AddBlock;
+            } else {
+                return ValidateChainRes::IgnoreBlock;
+            }
+        } else {
+            return ValidateChainRes::RequestFullChain;
+        }
+    }
+    let last_block = &current_chain[current_chain.len() - 1];
+
+    if new_block.idx <= last_block.idx {
+        // If the block is earlier in the chain ignore the block;
+        return ValidateChainRes::IgnoreBlock;
+    }
+
+    // if current chain has blocks only try to add new block if it says it is the next block on the chain
+    if new_block.idx == last_block.idx + 1 {
+        if new_block.prev_hash != last_block.hash {
+            // if hash mismatch blocked
+            return ValidateChainRes::IgnoreBlock;
+        } else {
+            if Block::validate(new_block) {
+                return ValidateChainRes::AddBlock;
+            } else {
+                return ValidateChainRes::IgnoreBlock;
+            }
+        }
+    } else {
+        return ValidateChainRes::RequestFullChain;
+    }
+}
+
 impl Block {
+    pub fn validate(block: &Self) -> bool {
+        // The block needs to have a nonce
+        if block.nonce.is_none() {
+            return false;
+        }
+        // the block needs to have a hash
+        if block.hash.is_empty() {
+            return false;
+        }
+        // the block needs to have set number of leading zeroes
+        if !check_leading_zeroes(block.hash.as_slice(), DIFFICULTY) {
+            return false;
+        }
+        let mut block_clone = block.clone();
+        block_clone.hash = vec![];
+        block_clone.nonce = None;
+        // Check if the reported hash is correct
+        // convert to bytes without hash and nonce
+        let p = wincode::serialize(&block_clone);
+        if p.is_err() {
+            return false;
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(&p.unwrap());
+        // update hasher with reported nonce
+        hasher.update(block.nonce.unwrap().to_be_bytes());
+        let h = hasher.finalize();
+        // check if final hash matches reported hash
+        return *h == block.hash;
+    }
+
     pub fn new(idx: usize, data: Candidate, prev_hash: Vec<u8>) -> Self {
         let mut block = Block {
             idx,
@@ -61,20 +153,23 @@ impl Block {
         return block;
     }
     pub fn hash(&mut self) {
-        println!("HASH FUNC");
         self.hash = vec![];
         self.nonce = None;
+        // Convert to bytes without the hash and nonce
         let p = wincode::serialize(self).expect("Error while serializing block");
         let mut base_hasher = Sha256::new();
         base_hasher.update(&p);
         let v = (0u128..u128::MAX).into_par_iter().find_any(|v| {
             let mut hasher = base_hasher.clone();
+            // append candidate nonce to hasher
             hasher.update(&v.to_be_bytes());
             let h = hasher.finalize();
+            // check for leading zeroes
             return check_leading_zeroes(h.as_slice(), DIFFICULTY);
         });
-        let nonce = v.expect("No nonce found");
 
+        // update the block with hash and nonce
+        let nonce = v.expect("No nonce found");
         self.nonce = Some(nonce);
         let mut final_hasher = base_hasher.clone();
         final_hasher.update(nonce.to_be_bytes());
