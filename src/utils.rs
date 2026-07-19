@@ -7,7 +7,7 @@ use tokio::{
     time::Sleep,
 };
 
-use crate::{block::Block, network_message::{NetworkMessageReq, NetworkMessageRes}, peer_serializable::PeerSerializable};
+use crate::types::{block::Block, network_message::{NetworkMessageReq, NetworkMessageRes}, peer_serializable::PeerSerializable};
 
 pub async fn send_packet_and_wait(
     stream: &mut TcpStream,

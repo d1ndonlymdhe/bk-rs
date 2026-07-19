@@ -1,6 +1,6 @@
 use enum_iterator::all;
 
-use crate::block::{Block, Candidate};
+use crate::types::block::{Block, Candidate};
 
 pub fn mine_random_block(last_block: Option<&Block>, last_idx: usize) -> Block {
     println!("MINE RANDOM BLOCK");

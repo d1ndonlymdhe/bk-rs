@@ -6,23 +6,24 @@ use tokio::{
 };
 
 use crate::{
-    block::{Block, validate_chain_addition},
-    network_message::{NetworkMessageReq, NetworkMessageRes},
     randomizer::mine_random_block,
     server_proc::server_process,
+    types::{
+        block::{Block, ValidateChainRes, validate_chain_addition},
+        network_message::{NetworkMessageReq, NetworkMessageRes},
+    },
 };
-use crate::{peer::Peer, peer_serializable::PeerSerializable, utils::save_chain_to_file};
 use crate::{
-    peer::peer_exists,
+    types::peer::Peer, types::peer_serializable::PeerSerializable, utils::save_chain_to_file,
+};
+use crate::{
+    types::peer::peer_exists,
     utils::{open_stream, send_packet_and_wait},
 };
 
-mod block;
-mod network_message;
-mod peer;
-mod peer_serializable;
 mod randomizer;
 mod server_proc;
+mod types;
 mod utils;
 
 fn save_chain(node_id: &str, chain: &Vec<Block>) -> std::io::Result<()> {
@@ -101,13 +102,13 @@ async fn main() {
                 let mut chain = binding.lock().await;
                 let rand_block = rand_block.unwrap();
                 match validate_chain_addition(&chain, &rand_block) {
-                    block::ValidateChainRes::RequestFullChain => {
+                    ValidateChainRes::RequestFullChain => {
                         println!("GOT REQUEST FOR FULL CHAIN FROM SELF MINE: IGNORE");
                     }
-                    block::ValidateChainRes::IgnoreBlock => {
+                    ValidateChainRes::IgnoreBlock => {
                         println!("Invalid block mined: Ignore")
                     }
-                    block::ValidateChainRes::AddBlock => {
+                    ValidateChainRes::AddBlock => {
                         chain.push(rand_block);
                     }
                 }

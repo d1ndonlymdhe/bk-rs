@@ -6,13 +6,13 @@ use tokio::{
     sync::{Mutex, mpsc},
 };
 
-use crate::{
+use crate::types::{
     block::Block,
     network_message::{NetworkMessageReq, NetworkMessageRes, SyncResMessage},
     peer::{Peer, peer_exists},
     peer_serializable::PeerSerializable,
-    utils::send_packet_res,
 };
+use crate::utils::send_packet_res;
 
 pub async fn server_process(
     stream: &mut TcpStream,

@@ -1,6 +1,6 @@
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{block::Block, peer_serializable::PeerSerializable};
+use crate::types::{block::Block, peer_serializable::PeerSerializable};
 
 #[derive(Debug, Clone, SchemaRead, SchemaWrite)]
 pub struct SyncResMessage {

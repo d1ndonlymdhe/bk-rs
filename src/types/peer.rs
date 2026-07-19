@@ -6,7 +6,12 @@ use tokio::{
 };
 
 use crate::{
-    block::{Block, ValidateChainRes, validate_chain, validate_chain_addition}, network_message::{NetworkMessageReq, NetworkMessageRes, SyncResMessage}, peer_serializable::PeerSerializable, utils::{NetError, open_stream, send_packet_and_wait, timeout},
+    types::{
+        block::{Block, ValidateChainRes, validate_chain, validate_chain_addition},
+        network_message::{NetworkMessageReq, NetworkMessageRes, SyncResMessage},
+        peer_serializable::PeerSerializable,
+    },
+    utils::{NetError, open_stream, send_packet_and_wait, timeout},
 };
 
 #[derive(Debug)]
