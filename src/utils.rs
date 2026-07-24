@@ -7,7 +7,11 @@ use tokio::{
     time::Sleep,
 };
 
-use crate::types::{block::Block, network_message::{NetworkMessageReq, NetworkMessageRes}, peer_serializable::PeerSerializable};
+use crate::types::{
+    block::Block,
+    network_message::{NetworkMessageReq, NetworkMessageRes},
+    peer::Peer,
+};
 
 pub async fn send_packet_and_wait(
     stream: &mut TcpStream,
@@ -29,11 +33,12 @@ pub async fn send_packet_and_wait(
 }
 
 pub fn timeout() -> Sleep {
-    return tokio::time::sleep(Duration::new(5, 0));
+    return tokio::time::sleep(Duration::new(15, 0));
 }
 
-pub async fn open_stream(remote_peer: &PeerSerializable) -> Result<TcpStream, Error> {
+pub async fn open_stream(remote_peer: &Peer) -> Result<TcpStream, Error> {
     let stream = TcpStream::connect(SocketAddr::new(remote_peer.ip, remote_peer.port)).await?;
+    stream.set_zero_linger().unwrap();
     return Ok(stream);
 }
 
@@ -61,19 +66,44 @@ pub enum NetError {
     Timeout,
 }
 
+impl NetError {
+    pub fn to_string(self) -> String {
+        return self.into();
+    }
+}
+
 impl From<std::io::Error> for NetError {
     fn from(value: std::io::Error) -> Self {
         return NetError::IoError(value);
     }
 }
 
+impl Into<String> for NetError {
+    fn into(self) -> String {
+        return match self {
+            NetError::IoError(error) => error.to_string(),
+            NetError::Timeout => "Timed out".into(),
+        };
+    }
+}
+
 #[allow(dead_code)]
-pub fn save_chain_to_file(chain: &[Block], filename: &str) -> Result<(), Error> {
+pub fn save_chain_to_file(
+    chain: &[Block],
+    filename: &str,
+    self_peer: Peer,
+    known_peers: &[Peer],
+) -> Result<(), Error> {
     use std::fs::File;
     use std::io::Write;
 
     let mut file = File::create(filename)?;
-
+    let line = format!("Self Peer: Ip: {} Port: {}\n", self_peer.ip, self_peer.port);
+    file.write_all(line.as_bytes())?;
+    for peer in known_peers {
+        let line = format!("Known Peer: Ip: {} Port: {}\n", peer.ip, peer.port);
+        file.write_all(line.as_bytes())?;
+    }
     for block in chain {
         let line = format!(
             "Block {}: data={:?}, prev_hash={:?}, nonce={:?}, hash={:?}\n",

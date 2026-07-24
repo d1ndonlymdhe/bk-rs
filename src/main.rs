@@ -1,37 +1,13 @@
-use std::{env, sync::Arc};
+use std::{env, net::IpAddr, str::FromStr, sync::Arc};
 
-use tokio::{
-    net::TcpListener,
-    sync::{Mutex, mpsc},
-};
+use tokio::{net::TcpListener, sync::Mutex};
 
-use crate::{
-    randomizer::mine_random_block,
-    server_proc::server_process,
-    types::{
-        block::{Block, ValidateChainRes, validate_chain_addition},
-        network_message::{NetworkMessageReq, NetworkMessageRes},
-    },
-};
-use crate::{
-    types::peer::Peer, types::peer_serializable::PeerSerializable, utils::save_chain_to_file,
-};
-use crate::{
-    types::peer::peer_exists,
-    utils::{open_stream, send_packet_and_wait},
-};
+use crate::types::app_state::AppState;
+use crate::types::peer::Peer;
 
 mod randomizer;
-mod server_proc;
 mod types;
 mod utils;
-
-fn save_chain(node_id: &str, chain: &Vec<Block>) -> std::io::Result<()> {
-    let filename = format!("chain_{}.bin", node_id);
-    let _ = save_chain_to_file(chain, &filename)?;
-    println!("Chain saved to {} ({} blocks)", filename, chain.len());
-    Ok(())
-}
 
 #[tokio::main]
 async fn main() {
@@ -51,183 +27,72 @@ async fn main() {
     if args_vec.len() >= 3 {
         let root_ip = args_vec[1].clone();
         let root_port = args_vec[2].parse::<u16>().unwrap();
-        root_peer_info = Some((root_ip.parse().unwrap(), root_port));
+        root_peer_info = Some(Peer {
+            ip: IpAddr::from_str(&root_ip).unwrap(),
+            port: root_port,
+        });
     }
 
-    let chain: Arc<Mutex<Vec<Block>>> = Arc::new(Mutex::new(Vec::new()));
-    let (peer_drop_signal_sender, mut peer_drop_signal_receiver) =
-        mpsc::channel::<(PeerSerializable, String)>(5);
     let sock = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    
     let local_addr = sock.local_addr().unwrap();
     let ip = local_addr.ip();
     let ip_string = ip.to_string();
     let port = local_addr.port();
     println!("IP: {}, Port: {}", ip_string, port);
-    let known_peers: Arc<Mutex<Vec<Peer>>> = Arc::new(Mutex::new(vec![]));
+    let app_state = Arc::new(AppState::init(
+        node_id,
+        Peer { ip, port },
+        Arc::new(Mutex::new(vec![])),
+        Arc::new(Mutex::new(vec![])),
+    ));
 
-    // Create and initialize root peer if provided
-    if root_peer_info.is_some() {
-        let (root_ip, root_port) = root_peer_info.unwrap();
-        let mut p = Peer::new(
-            root_ip,
-            root_port,
-            peer_drop_signal_sender.clone(),
-            chain.clone(),
-        );
-        p.init_sync(known_peers.clone(), chain.clone());
-        let mut known_peers_lock = known_peers.lock().await;
-        known_peers_lock.push(p);
-    }
-
-    let chain_rand_block = chain.clone();
-
-    println!("Random block mining initialized");
+    let app_state_mining = app_state.clone();
     tokio::spawn(async move {
-        println!("HELLO");
         loop {
-            let binding = chain_rand_block.clone();
-            let chain = binding.lock().await;
-            let last_block = chain.iter().last().cloned();
-            let len = chain.len();
-            drop(chain);
-
-            let rand_block = tokio::task::spawn_blocking(move || {
-                mine_random_block(last_block.as_ref(), if len > 0 { len - 1 } else { 0 })
-            })
-            .await;
-            if rand_block.is_err() {
-                println!("{:?}", rand_block.err());
-            } else {
-                println!("Random block mined");
-                let mut chain = binding.lock().await;
-                let rand_block = rand_block.unwrap();
-                match validate_chain_addition(&chain, &rand_block) {
-                    ValidateChainRes::RequestFullChain => {
-                        println!("GOT REQUEST FOR FULL CHAIN FROM SELF MINE: IGNORE");
-                    }
-                    ValidateChainRes::IgnoreBlock => {
-                        println!("Invalid block mined: Ignore")
-                    }
-                    ValidateChainRes::AddBlock => {
-                        chain.push(rand_block);
-                    }
-                }
-            }
-            // .unwrap();
+            app_state_mining.mine_random_block().await;
         }
     });
 
-    let self_serialized = PeerSerializable { ip, port };
-    let chain_peer_discovery = chain.clone();
-
-    // Perform peer discovery from root peer if we have one
+    let app_state_peer_discovery = app_state.clone();
     if !root_peer_info.is_none() {
-        // Get root peer from known_peers
-        let known_peers_lock = known_peers.lock().await;
-        if let Some(root_peer) = known_peers_lock.first() {
-            let root_peer_serialized = PeerSerializable {
-                ip: root_peer.ip,
-                port: root_peer.port,
-            };
-            drop(known_peers_lock);
-
-            let stream = open_stream(&root_peer_serialized).await;
-            if stream.is_ok() {
-                let mut stream = stream.unwrap();
-                let res = send_packet_and_wait(
-                    &mut stream,
-                    NetworkMessageReq::PeerDiscoveryReq(self_serialized),
-                )
-                .await;
-                match res {
-                    Ok(msg) => match msg {
-                        NetworkMessageRes::PeerDiscoveryRes(peers) => {
-                            let mut known_peers_lock = known_peers.lock().await;
-                            for peer in peers {
-                                if peer != self_serialized && !peer_exists(&known_peers_lock, &peer)
-                                {
-                                    let mut new_peer: Peer = Peer::from_serializable(
-                                        peer,
-                                        peer_drop_signal_sender.clone(),
-                                        chain_peer_discovery.clone(),
-                                    );
-                                    let hb_chain = chain.clone();
-                                    let hb_peers = known_peers.clone();
-                                    new_peer.init_sync(hb_peers, hb_chain);
-                                    known_peers_lock.push(new_peer);
-                                }
-                            }
-                        }
-                        _ => {
-                            panic!("UNSUPPORTED RESPONSE FOR PEER DISCOVERY")
-                        }
-                    },
-                    Err(_) => panic!("Could not get peer discovery response from root peer"),
-                }
-            } else {
-                panic!("Could not connect with root peer")
-            }
+        let r = app_state_peer_discovery
+            .root_peer_discovery(root_peer_info.unwrap())
+            .await;
+        if r.is_err() {
+            println!(
+                "Error occurred while discovering root peer: {}",
+                r.unwrap_err()
+            );
+            return;
         }
     }
-    let known_peers_c = known_peers.clone();
 
-    // Listen for peer drop signals, when peer is dropped heartbeat is cancelled
-    tokio::spawn(async move {
-        let known_peers = known_peers.clone();
-        loop {
-            let known_peers = known_peers.clone();
-            let s = peer_drop_signal_receiver
-                .recv()
-                .await
-                .expect("Error listening to drop signals");
-            println!("Received drop signal for peer: {:#?}, reason: {}", s.0, s.1);
-            {
-                let mut known_peers = known_peers.lock().await;
-                known_peers.retain(|p| *p != s.0);
-            }
-        }
-    });
-
-    let known_peers_c = known_peers_c.clone();
-    let chain_server_proc = chain.clone();
     println!("Starting server process");
 
+    let app_state_server_process = app_state.clone();
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
     let mut sigint =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
-    let chain_for_signal = chain.clone();
-    let node_id_for_signal = node_id.clone();
 
     tokio::select! {
         _ = async {
             loop {
-                let (mut stream, peer_addr) = sock.accept().await.unwrap();
-                let peer_drop_signal_sender = peer_drop_signal_sender.clone();
-                let v = known_peers_c.clone();
-                let chain_server_proc = chain_server_proc.clone();
+                let (mut stream, _peer_addr) = sock.accept().await.unwrap();
+                let binding = app_state_server_process.clone();
                 tokio::spawn(async move {
-                    // server listen process
-                    server_process(
-                        &mut stream,
-                        peer_addr,
-                        v.clone(),
-                        peer_drop_signal_sender,
-                        chain_server_proc.clone(),
-                    )
-                    .await;
+                    binding.server_process(&mut stream).await;
                 });
             }
         } => {}
         _ = sigterm.recv() => {
             println!("Received SIGTERM, saving chain and exiting...");
-            let chain_lock = chain_for_signal.lock().await;
-            let _ = save_chain(&node_id_for_signal, &chain_lock);
+            app_state_server_process.save_chain().await;
         }
         _ = sigint.recv() => {
             println!("Received SIGINT, saving chain and exiting...");
-            let chain_lock = chain_for_signal.lock().await;
-            let _ = save_chain(&node_id_for_signal, &chain_lock);
+            app_state_server_process.save_chain().await;
         }
     }
 }

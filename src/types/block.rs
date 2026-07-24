@@ -3,7 +3,7 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use wincode::{SchemaRead, SchemaWrite};
 
-const DIFFICULTY: usize = 22;
+const DIFFICULTY: usize = 20;
 fn check_leading_zeroes(hash: &[u8], difficulty: usize) -> bool {
     let full_bytes = difficulty / 8;
     let remaining_bits = difficulty % 8;
@@ -48,66 +48,6 @@ pub struct Block {
     pub hash: Vec<u8>,
 }
 
-pub fn validate_chain(new_blocks: &[Block], current_chain: &[Block]) -> bool {
-    if new_blocks.len() <= current_chain.len() {
-        return false;
-    }
-    let mut prev_block_hash = new_blocks[0].hash.clone();
-    for i in 1..new_blocks.len() {
-        if new_blocks[i].prev_hash != prev_block_hash {
-            return false;
-        }
-        if !Block::validate(&new_blocks[i]) {
-            return false;
-        }
-        prev_block_hash = new_blocks[i].hash.clone();
-    }
-    true
-}
-
-pub enum ValidateChainRes {
-    RequestFullChain,
-    IgnoreBlock,
-    AddBlock,
-}
-
-// Assumes that the provided chain itself is valid
-pub fn validate_chain_addition(current_chain: &[Block], new_block: &Block) -> ValidateChainRes {
-    if current_chain.is_empty() {
-        // Only try to add new block if it says it is the first block on the chain
-        if new_block.idx == 0 {
-            if Block::validate(new_block) {
-                return ValidateChainRes::AddBlock;
-            } else {
-                return ValidateChainRes::IgnoreBlock;
-            }
-        } else {
-            return ValidateChainRes::RequestFullChain;
-        }
-    }
-    let last_block = &current_chain[current_chain.len() - 1];
-
-    if new_block.idx <= last_block.idx {
-        // If the block is earlier in the chain ignore the block;
-        return ValidateChainRes::IgnoreBlock;
-    }
-
-    // if current chain has blocks only try to add new block if it says it is the next block on the chain
-    if new_block.idx == last_block.idx + 1 {
-        if new_block.prev_hash != last_block.hash {
-            // if hash mismatch blocked
-            return ValidateChainRes::IgnoreBlock;
-        } else {
-            if Block::validate(new_block) {
-                return ValidateChainRes::AddBlock;
-            } else {
-                return ValidateChainRes::IgnoreBlock;
-            }
-        }
-    } else {
-        return ValidateChainRes::RequestFullChain;
-    }
-}
 
 impl Block {
     pub fn validate(block: &Self) -> bool {

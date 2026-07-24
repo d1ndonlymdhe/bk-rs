@@ -28,8 +28,17 @@ def stream_output(name: str, proc: subprocess.Popen[str], on_line=None) -> None:
             on_line(text)
 
 
-def launch_node(work_dir: Path, node_name: str, root_ip: str | None = None, root_port: int | None = None) -> NodeProcess:
-    cmd = ["cargo", "run", "--", node_name]
+def launch_node(
+    work_dir: Path,
+    node_name: str,
+    root_ip: str | None = None,
+    root_port: int | None = None,
+    use_binary: bool = False,
+) -> NodeProcess:
+    if use_binary:
+        cmd = [str(work_dir / "target" / "release" / "bk-rs"), node_name]
+    else:
+        cmd = ["cargo", "run", "--", node_name]
     if root_ip is not None and root_port is not None:
         cmd.extend([root_ip, str(root_port)])
 
@@ -112,6 +121,12 @@ def main() -> int:
         default="127.0.0.1",
         help="IP used by non-root nodes to connect to root (default: 127.0.0.1)",
     )
+    parser.add_argument(
+        "-b",
+        "--binary",
+        action="store_true",
+        help="Use compiled release binary at target/release/bk-rs instead of cargo run",
+    )
     args = parser.parse_args()
 
     if args.n < 1:
@@ -128,7 +143,7 @@ def main() -> int:
     try:
         root_name = f"{args.node_prefix}0"
         print(f"Launching root: {root_name}")
-        root = launch_node(work_dir, root_name)
+        root = launch_node(work_dir, root_name, use_binary=args.binary)
         nodes.append(root)
 
         reported_ip, root_port = wait_for_root_address(root)
@@ -142,7 +157,7 @@ def main() -> int:
 
             node_name = f"{args.node_prefix}{i}"
             print(f"Launching peer: {node_name}")
-            peer = launch_node(work_dir, node_name, args.connect_ip, root_port)
+            peer = launch_node(work_dir, node_name, args.connect_ip, root_port, args.binary)
             nodes.append(peer)
             monitor_node_output(peer)
 
