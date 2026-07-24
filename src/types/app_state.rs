@@ -87,9 +87,17 @@ impl AppState {
 
     pub async fn server_process(&self, stream: &mut TcpStream) {
         let mut buff = [0; 1024];
+        let mut final_buff = Vec::new();
         stream.readable().await.unwrap();
-        stream.read(&mut buff).await.unwrap();
-
+        loop {
+            let bytes_read = stream.read(&mut buff).await.unwrap();
+            final_buff.extend_from_slice(&buff[..bytes_read]);
+            if bytes_read < 1024 {
+                break;
+            }
+            // set a max limit?
+        }
+        let buff = &final_buff;
         let req = wincode::deserialize::<NetworkMessageReq>(&buff);
         if let Ok(req) = req {
             match req {
