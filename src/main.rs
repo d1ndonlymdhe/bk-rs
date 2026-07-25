@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::{env, net::IpAddr, str::FromStr, sync::Arc};
 
 use tokio::{net::TcpListener, sync::Mutex};
@@ -34,7 +35,7 @@ async fn main() {
     }
 
     let sock = TcpListener::bind("0.0.0.0:0").await.unwrap();
-    
+
     let local_addr = sock.local_addr().unwrap();
     let ip = local_addr.ip();
     let ip_string = ip.to_string();
@@ -45,6 +46,7 @@ async fn main() {
         Peer { ip, port },
         Arc::new(Mutex::new(vec![])),
         Arc::new(Mutex::new(vec![])),
+        Arc::new(Mutex::new(HashSet::new())),
     ));
 
     let app_state_mining = app_state.clone();

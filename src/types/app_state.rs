@@ -1,5 +1,4 @@
-use core::panic;
-use std::{println, sync::Arc};
+use std::{collections::HashSet, println, sync::Arc};
 use tokio::{io::AsyncReadExt, net::TcpStream, sync::Mutex, task::JoinSet};
 
 use crate::{
@@ -18,6 +17,7 @@ pub struct AppState {
     self_as_peer: Peer,
     known_peers: Arc<Mutex<Vec<Peer>>>,
     chain: Arc<Mutex<Vec<Block>>>,
+    seen_voter_ids: Arc<Mutex<HashSet<String>>>,
     node_id: String,
 }
 
@@ -27,12 +27,14 @@ impl AppState {
         self_as_peer: Peer,
         known_peers: Arc<Mutex<Vec<Peer>>>,
         chain: Arc<Mutex<Vec<Block>>>,
+        seen_voter_ids: Arc<Mutex<HashSet<String>>>,
     ) -> Self {
         return Self {
             self_as_peer,
             known_peers,
             chain,
             node_id,
+            seen_voter_ids,
         };
     }
 
@@ -158,9 +160,12 @@ impl AppState {
 
     pub async fn add_block_to_chain(&self, block: Block) {
         let mut chain_lock = self.chain.lock().await;
-        match Self::validate_chain_addition(&chain_lock, &block) {
+        let mut seen_voter_ids = self.seen_voter_ids.lock().await;
+        match Self::validate_chain_addition(&seen_voter_ids, &chain_lock, &block) {
             ValidateChainRes::AddBlock => {
+                let voter_id = block.voter_id.clone();
                 chain_lock.push(block);
+                seen_voter_ids.insert(voter_id);
                 drop(chain_lock);
                 self.push_chain_sync().await;
             }
@@ -190,6 +195,7 @@ impl AppState {
             return false;
         }
         let mut prev_block_hash = new_blocks[0].hash.clone();
+        let mut new_blocks_voter_ids = HashSet::new();
         for i in 1..new_blocks.len() {
             if new_blocks[i].prev_hash != prev_block_hash {
                 return false;
@@ -197,23 +203,36 @@ impl AppState {
             if !Block::validate(&new_blocks[i]) {
                 return false;
             }
-            prev_block_hash = new_blocks[i].hash.clone();
+            if !new_blocks_voter_ids.contains(&new_blocks[i].voter_id) {
+                new_blocks_voter_ids.insert(new_blocks[i].voter_id.clone());
+                prev_block_hash = new_blocks[i].hash.clone();
+            } else {
+                return false;
+            }
         }
         true
     }
 
     // Assumes that the provided chain itself is valid
-    fn validate_chain_addition(current_chain: &[Block], new_block: &Block) -> ValidateChainRes {
+    fn validate_chain_addition(
+        seen_voter_ids: &HashSet<String>,
+        current_chain: &[Block],
+        new_block: &Block,
+    ) -> ValidateChainRes {
         if current_chain.is_empty() {
             // Only try to add new block if it says it is the first block on the chain
             if new_block.idx == 0 {
                 if Block::validate(new_block) {
-                    return ValidateChainRes::AddBlock;
+                    if !seen_voter_ids.contains(&new_block.voter_id) {
+                        return ValidateChainRes::AddBlock;
+                    } else {
+                        return ValidateChainRes::IgnoreBlock;
+                    }
                 } else {
                     return ValidateChainRes::IgnoreBlock;
                 }
             } else {
-                return ValidateChainRes::RequestFullChain;
+                return ValidateChainRes::IgnoreBlock;
             }
         }
         let last_block = &current_chain[current_chain.len() - 1];
@@ -236,7 +255,7 @@ impl AppState {
                 }
             }
         } else {
-            return ValidateChainRes::RequestFullChain;
+            return ValidateChainRes::IgnoreBlock;
         }
     }
 
@@ -366,7 +385,6 @@ impl AppState {
 }
 
 enum ValidateChainRes {
-    RequestFullChain,
     IgnoreBlock,
     AddBlock,
 }

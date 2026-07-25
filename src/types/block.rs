@@ -27,6 +27,9 @@ pub enum Candidate {
     A,
     B,
     C,
+    D,
+    E,
+    F,
 }
 
 impl Into<String> for Candidate {
@@ -35,6 +38,9 @@ impl Into<String> for Candidate {
             Candidate::A => "A".into(),
             Candidate::B => "B".into(),
             Candidate::C => "C".into(),
+            Candidate::D => "D".into(),
+            Candidate::E => "E".into(),
+            Candidate::F => "F".into(),
         }
     }
 }
@@ -46,8 +52,9 @@ pub struct Block {
     pub prev_hash: Vec<u8>,
     pub nonce: Option<u128>,
     pub hash: Vec<u8>,
+    // Could be something else later LRS identifier
+    pub voter_id: String,
 }
-
 
 impl Block {
     pub fn validate(block: &Self) -> bool {
@@ -59,6 +66,12 @@ impl Block {
         if block.hash.is_empty() {
             return false;
         }
+
+        // Just checking if valid uuid
+        if uuid::Uuid::parse_str(&block.voter_id).is_err() {
+            return false;
+        }
+
         // the block needs to have set number of leading zeroes
         if !check_leading_zeroes(block.hash.as_slice(), DIFFICULTY) {
             return false;
@@ -81,13 +94,14 @@ impl Block {
         return *h == block.hash;
     }
 
-    pub fn new(idx: usize, data: Candidate, prev_hash: Vec<u8>) -> Self {
+    pub fn new(idx: usize, data: Candidate, prev_hash: Vec<u8>, voter_id: String) -> Self {
         let mut block = Block {
             idx,
             data,
             prev_hash,
             nonce: None,
             hash: vec![],
+            voter_id,
         };
         block.hash();
         return block;
