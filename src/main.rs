@@ -1,13 +1,21 @@
 use std::collections::HashSet;
-use std::{env, net::IpAddr, str::FromStr, sync::Arc};
+use std::println;
+use std::{
+    env,
+    net::IpAddr,
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 
-use tokio::{net::TcpListener, sync::Mutex};
+use tokio::net::TcpListener;
 
+use crate::http::rocket_server;
 use crate::types::app_state::AppState;
 use crate::types::peer::Peer;
 
 mod randomizer;
 mod types;
+mod http;
 mod utils;
 
 #[tokio::main]
@@ -49,12 +57,12 @@ async fn main() {
         Arc::new(Mutex::new(HashSet::new())),
     ));
 
-    let app_state_mining = app_state.clone();
-    tokio::spawn(async move {
-        loop {
-            app_state_mining.mine_random_block().await;
-        }
-    });
+    // let app_state_mining = app_state.clone();
+    // tokio::spawn(async move {
+    //     loop {
+    //         app_state_mining.mine_random_block().await;
+    //     }
+    // });
 
     let app_state_peer_discovery = app_state.clone();
     if !root_peer_info.is_none() {
@@ -68,6 +76,9 @@ async fn main() {
             );
             return;
         }
+    }else{
+        println!("This is the root peer");
+        tokio::spawn(rocket_server(app_state.clone()));
     }
 
     println!("Starting server process");
@@ -77,6 +88,9 @@ async fn main() {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
     let mut sigint =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+
+
+
 
     tokio::select! {
         _ = async {

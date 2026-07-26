@@ -106,13 +106,14 @@ pub fn save_chain_to_file(
     }
     for block in chain {
         let line = format!(
-            "Block {}: voter_id = {:?}, data={:?}, prev_hash={:?}, nonce={:?}, hash={:?}\n",
+            "Block {}: voter_id = {:?}, data={:?}, prev_hash={:?}, nonce={:?}, hash={:?}, timestamp={}\n",
             block.idx,
             block.voter_id,
             block.data,
             hex::encode(&block.prev_hash),
             block.nonce,
-            hex::encode(&block.hash)
+            hex::encode(&block.hash),
+            block.timestamp
         );
         file.write_all(line.as_bytes())?;
     }

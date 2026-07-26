@@ -1,6 +1,8 @@
 use enum_iterator::Sequence;
 use rayon::prelude::*;
+use rocket::request::FromParam;
 use sha2::{Digest, Sha256};
+use std::time::{SystemTime, UNIX_EPOCH};
 use wincode::{SchemaRead, SchemaWrite};
 
 const DIFFICULTY: usize = 20;
@@ -22,7 +24,7 @@ fn check_leading_zeroes(hash: &[u8], difficulty: usize) -> bool {
     return true;
 }
 
-#[derive(SchemaWrite, SchemaRead, PartialEq, Eq, Clone, Copy, Debug, Sequence)]
+#[derive(SchemaWrite, SchemaRead, PartialEq, Eq, Hash, Clone, Copy, Debug, Sequence)]
 pub enum Candidate {
     A,
     B,
@@ -30,6 +32,22 @@ pub enum Candidate {
     D,
     E,
     F,
+}
+
+impl<'a> FromParam<'a> for Candidate {
+    type Error = &'static str;
+
+    fn from_param(param: &'a str) -> Result<Self, Self::Error> {
+        match param {
+            "A" => Ok(Candidate::A),
+            "B" => Ok(Candidate::B),
+            "C" => Ok(Candidate::C),
+            "D" => Ok(Candidate::D),
+            "E" => Ok(Candidate::E),
+            "F" => Ok(Candidate::F),
+            _ => Err("Invalid candidate"),
+        }
+    }
 }
 
 impl Into<String> for Candidate {
@@ -54,6 +72,8 @@ pub struct Block {
     pub hash: Vec<u8>,
     // Could be something else later LRS identifier
     pub voter_id: String,
+    // Milliseconds since UNIX_EPOCH when the block was mined
+    pub timestamp: u128,
 }
 
 impl Block {
@@ -94,14 +114,19 @@ impl Block {
         return *h == block.hash;
     }
 
-    pub fn new(idx: usize, data: Candidate, prev_hash: Vec<u8>, voter_id: String) -> Self {
+    pub fn new(idx: usize, data: Candidate, prev_hash: Vec<u8>, voter_id: &str) -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("System time is before UNIX_EPOCH")
+            .as_millis();
         let mut block = Block {
             idx,
             data,
             prev_hash,
             nonce: None,
             hash: vec![],
-            voter_id,
+            voter_id: voter_id.to_string(),
+            timestamp,
         };
         block.hash();
         return block;

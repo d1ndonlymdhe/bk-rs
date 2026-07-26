@@ -93,7 +93,7 @@ def stop_all(nodes: list[NodeProcess]) -> None:
             except ProcessLookupError:
                 pass
 
-    deadline = time.time() + 10
+    deadline = time.time() + 0.5
     for node in nodes:
         if node.proc.poll() is None:
             remaining = max(0.0, deadline - time.time())
@@ -118,8 +118,8 @@ def main() -> int:
     parser.add_argument("--delay-max", type=float, default=10.0, help="Maximum delay between launches in seconds")
     parser.add_argument(
         "--connect-ip",
-        default="127.0.0.1",
-        help="IP used by non-root nodes to connect to root (default: 127.0.0.1)",
+        default="0.0.0.0",
+        help="IP used by non-root nodes to connect to root (default: 0.0.0.0)",
     )
     parser.add_argument(
         "-b",
@@ -153,7 +153,7 @@ def main() -> int:
         for i in range(1, args.n):
             delay = random.uniform(args.delay_min, args.delay_max)
             print(f"Waiting {delay:.1f}s before launching next node...")
-            time.sleep(delay)
+            time.sleep(1)
 
             node_name = f"{args.node_prefix}{i}"
             print(f"Launching peer: {node_name}")
