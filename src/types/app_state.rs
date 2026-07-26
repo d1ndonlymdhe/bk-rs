@@ -71,20 +71,34 @@ impl AppState {
     }
 
     pub async fn add_mining_task(&self, mining_task: MiningTask) {
+        println!(
+            "MINING TASK received: voter_id={} candidate={:?}",
+            mining_task.voter_id, mining_task.candidate
+        );
         let already_seen = self
             .seen_voter_ids
             .lock()
             .unwrap()
             .contains(&mining_task.voter_id);
         if already_seen {
+            println!(
+                "MINING TASK ignored: voter_id={} has already voted",
+                mining_task.voter_id
+            );
             return;
         }
 
         // a task for this voter is already queued
+        let voter_id = mining_task.voter_id.clone();
         let queued = self.mining_pool.lock().unwrap().add_task(mining_task);
         if !queued {
+            println!(
+                "MINING TASK ignored: voter_id={} is already queued",
+                voter_id
+            );
             return;
         }
+        println!("MINING TASK queued: voter_id={}", voter_id);
 
         self.drive_mining_pool().await;
     }
@@ -95,7 +109,10 @@ impl AppState {
     async fn drive_mining_pool(&self) {
         let mining_guard = match self.mining_lock.try_lock() {
             Ok(guard) => guard,
-            Err(_) => return,
+            Err(_) => {
+                println!("MINING already in progress, task left in pool for that run to pick up");
+                return;
+            }
         };
 
         loop {
@@ -105,13 +122,25 @@ impl AppState {
             };
             let task = match task {
                 Some(task) => task,
-                None => break,
+                None => {
+                    println!("MINING POOL drained, nothing left to mine");
+                    break;
+                }
             };
 
             let already_seen = self.seen_voter_ids.lock().unwrap().contains(&task.voter_id);
             if already_seen {
+                println!(
+                    "MINING TASK skipped: voter_id={} has already voted",
+                    task.voter_id
+                );
                 continue;
             }
+
+            println!(
+                "MINING started: voter_id={} candidate={:?}",
+                task.voter_id, task.candidate
+            );
 
             let (last_block, len) = {
                 let chain_lock = self.chain.lock().unwrap();
@@ -124,11 +153,21 @@ impl AppState {
             .await;
 
             if let Ok(block) = block {
+                println!(
+                    "MINING finished: voter_id={} idx={} hash={}",
+                    block.voter_id,
+                    block.idx,
+                    hex::encode(&block.hash)
+                );
                 let requeue_task = MiningTask {
                     voter_id: block.voter_id.clone(),
                     candidate: block.data,
                 };
                 if self.add_block_to_chain(block).await == ValidateChainRes::AttemptedLateAdd {
+                    println!(
+                        "MINING TASK requeued: voter_id={} lost the race for this chain slot",
+                        requeue_task.voter_id
+                    );
                     self.mining_pool.lock().unwrap().requeue(requeue_task);
                 }
             }
@@ -410,8 +449,10 @@ impl AppState {
         // if current chain has blocks only try to add new block if it says it is the next block on the chain
         if new_block.idx == last_block.idx + 1 {
             if new_block.prev_hash != last_block.hash {
-                // if hash mismatch blocked
-                return ValidateChainRes::IgnoreBlock;
+                // The chain's tip changed (e.g. replaced wholesale by sync_chain) while this
+                // block was being mined, so it's mining against a stale parent. Retryable, same
+                // as losing the race on idx.
+                return ValidateChainRes::AttemptedLateAdd;
             } else {
                 if Block::validate(new_block) {
                     return ValidateChainRes::AddBlock;

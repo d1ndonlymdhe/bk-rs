@@ -13,9 +13,9 @@ use crate::http::rocket_server;
 use crate::types::app_state::AppState;
 use crate::types::peer::Peer;
 
+mod http;
 mod randomizer;
 mod types;
-mod http;
 mod utils;
 
 #[tokio::main]
@@ -76,7 +76,7 @@ async fn main() {
             );
             return;
         }
-    }else{
+    } else {
         println!("This is the root peer");
         tokio::spawn(rocket_server(app_state.clone()));
     }
@@ -84,31 +84,11 @@ async fn main() {
     println!("Starting server process");
 
     let app_state_server_process = app_state.clone();
-    let mut sigterm =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
-    let mut sigint =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
-
-
-
-
-    tokio::select! {
-        _ = async {
-            loop {
-                let (mut stream, _peer_addr) = sock.accept().await.unwrap();
-                let binding = app_state_server_process.clone();
-                tokio::spawn(async move {
-                    binding.server_process(&mut stream).await;
-                });
-            }
-        } => {}
-        _ = sigterm.recv() => {
-            println!("Received SIGTERM, saving chain and exiting...");
-            app_state_server_process.save_chain().await;
-        }
-        _ = sigint.recv() => {
-            println!("Received SIGINT, saving chain and exiting...");
-            app_state_server_process.save_chain().await;
-        }
+    loop {
+        let (mut stream, _peer_addr) = sock.accept().await.unwrap();
+        let binding = app_state_server_process.clone();
+        tokio::spawn(async move {
+            binding.server_process(&mut stream).await;
+        });
     }
 }

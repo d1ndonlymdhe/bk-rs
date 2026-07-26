@@ -32,9 +32,12 @@ async fn add_vote(app_state: &State<Arc<AppState>>, voter_id: &str, vote: Candid
         voter_id: voter_id.to_string(),
         candidate: vote,
     };
-    distribute_vote_task(app_state.clone(), &vote_task).await;
-    distribute_vote_task(app_state.clone(), &vote_task).await;
-    distribute_vote_task(app_state.clone(), &vote_task).await;
+
+    let known_peer_count = app_state.get_known_peers().await.len();
+    let fan_out = ((known_peer_count as f64 * 0.4).ceil() as usize).max(1);
+    for _ in 0..fan_out {
+        distribute_vote_task(app_state.clone(), &vote_task).await;
+    }
 
     return "OK".to_string();
 }
@@ -70,41 +73,62 @@ async fn get_tally(app_state: &State<Arc<AppState>>) -> String {
     lines.join(",")
 }
 
+const DISTRIBUTE_MAX_ATTEMPTS: usize = 3;
+
 async fn distribute_vote_task(app_state: Arc<AppState>, task: &MiningTask) {
-    println!("GETTING PEERS");
     let known_peers = app_state.get_known_peers().await;
-    println!("GOT PEERS");
     if known_peers.len() == 0 {
+        eprintln!("No known peers to distribute mining task to");
         return;
     }
-    let rand_peer = known_peers[rand::random_range(0..known_peers.len())];
-    let stream = open_stream(&rand_peer).await;
 
-    match stream {
-        Ok(mut stream) => {
-            let r = send_packet_req(
-                &mut stream,
-                NetworkMessageReq::DistributeMiningTask(task.clone()),
-            )
-            .await;
-            match r {
-                Ok(_) => {
-                    println!(
-                        "Sending distribute task to {} {}",
-                        rand_peer.ip, rand_peer.port,
-                    );
-                    return;
-                }
-                Err(err) => {
-                    eprintln!("Error while sending mining task packet {}", err.to_string())
-                }
+    for attempt in 1..=DISTRIBUTE_MAX_ATTEMPTS {
+        let rand_peer = known_peers[rand::random_range(0..known_peers.len())];
+        let stream = open_stream(&rand_peer).await;
+
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(err) => {
+                eprintln!(
+                    "Attempt {}/{}: error opening stream to {}:{} - {}",
+                    attempt,
+                    DISTRIBUTE_MAX_ATTEMPTS,
+                    rand_peer.ip,
+                    rand_peer.port,
+                    err.to_string()
+                );
+                continue;
+            }
+        };
+
+        let r = send_packet_req(
+            &mut stream,
+            NetworkMessageReq::DistributeMiningTask(task.clone()),
+        )
+        .await;
+        match r {
+            Ok(_) => {
+                println!(
+                    "Sending distribute task to {} {}",
+                    rand_peer.ip, rand_peer.port,
+                );
+                return;
+            }
+            Err(err) => {
+                eprintln!(
+                    "Attempt {}/{}: error sending mining task to {}:{} - {}",
+                    attempt,
+                    DISTRIBUTE_MAX_ATTEMPTS,
+                    rand_peer.ip,
+                    rand_peer.port,
+                    err.to_string()
+                );
             }
         }
-        Err(err) => {
-            eprintln!(
-                "Error while opening stream to distribute task {}",
-                err.to_string()
-            )
-        }
     }
+
+    eprintln!(
+        "Failed to distribute mining task for voter_id={} after {} attempts",
+        task.voter_id, DISTRIBUTE_MAX_ATTEMPTS
+    );
 }
