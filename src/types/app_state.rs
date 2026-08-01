@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    net::IpAddr,
     println,
     sync::{Arc, Mutex},
 };
@@ -24,6 +25,7 @@ use crate::{
 
 pub struct AppState {
     self_as_peer: Peer,
+    public_ip: IpAddr,
     known_peers: Arc<Mutex<KnownPeers>>,
     chain: Arc<Mutex<Chain>>,
     seen_voter_ids: Arc<Mutex<HashSet<String>>>,
@@ -37,6 +39,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn init(
+        public_ip: IpAddr,
         node_id: String,
         self_as_peer: Peer,
         known_peers: Arc<Mutex<KnownPeers>>,
@@ -44,6 +47,7 @@ impl AppState {
         seen_voter_ids: Arc<Mutex<HashSet<String>>>,
     ) -> Self {
         return Self {
+            public_ip,
             self_as_peer,
             known_peers,
             chain,
@@ -192,7 +196,13 @@ impl AppState {
         if let Ok(mut stream) = stream {
             let res = send_packet_and_wait(
                 &mut stream,
-                NetworkMessageReq::PeerDiscoveryReq((self.self_as_peer, self.node_id.clone())),
+                NetworkMessageReq::PeerDiscoveryReq((
+                    Peer {
+                        ip: self.public_ip,
+                        port: self.self_as_peer.port,
+                    },
+                    self.node_id.clone(),
+                )),
             )
             .await;
             return match res {
@@ -293,7 +303,12 @@ impl AppState {
         }
     }
 
-    pub async fn sync_chain(&self, new_chain: Vec<Block>, sender_node_id: String, already_sent: Vec<String>) {
+    pub async fn sync_chain(
+        &self,
+        new_chain: Vec<Block>,
+        sender_node_id: String,
+        already_sent: Vec<String>,
+    ) {
         let new_len = new_chain.len();
         let outcome = {
             let mut chain_lock = self.chain.lock().unwrap();
@@ -312,7 +327,7 @@ impl AppState {
                     }
                     chain_lock.extend(new_chain);
                     let chain_hash = chain_lock.hash();
-                    known_peers_lock.update_chain_hash( &sender_node_id,chain_hash.clone());
+                    known_peers_lock.update_chain_hash(&sender_node_id, chain_hash.clone());
                     Ok((current_len, votes_cache, chain_hash))
                 }
                 Err(reason) => Err((current_len, reason)),

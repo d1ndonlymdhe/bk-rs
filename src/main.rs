@@ -7,40 +7,41 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use tokio::net::TcpListener;
-
 use crate::http::rocket_server;
 use crate::types::app_state::AppState;
 use crate::types::chain::Chain;
 use crate::types::known_peers::KnownPeers;
 use crate::types::peer::Peer;
+use clap::Parser;
+use tokio::net::TcpListener;
 
 mod http;
 mod randomizer;
 mod types;
 mod utils;
 
+#[derive(Parser)]
+struct Args {
+    #[arg(long, default_value = "node_0")]
+    node_id: String,
+    #[arg(long)]
+    root_ip: Option<String>,
+    #[arg(long)]
+    root_port: Option<u16>,
+    #[arg(long)]
+    root_id: Option<String>,
+    #[arg(long)]
+    public_ip: String,
+}
+
 #[tokio::main]
 async fn main() {
-    let mut args = env::args();
-    args.next(); // skip program name
-
-    let mut node_id = String::from("node_0");
     let mut root_peer_info = None;
-
-    // Parse arguments: first is node_id, then optional root IP and port
-    let args_vec: Vec<String> = args.collect();
-
-    if args_vec.len() >= 1 {
-        node_id = args_vec[0].clone();
-    }
-
-    if args_vec.len() >= 3 {
-        let root_ip = args_vec[1].clone();
-        let root_port = args_vec[2].parse::<u16>().unwrap();
-        let root_id = args_vec[3]
-            .parse::<String>()
-            .unwrap_or_else(|_| "node_0".into());
+    let args = Args::parse();
+    if args.root_id.is_some() && args.root_ip.is_some() && args.root_port.is_some() {
+        let root_ip = args.root_ip.unwrap();
+        let root_port = args.root_port.unwrap();
+        let root_id = args.root_id.unwrap();
         root_peer_info = Some((
             Peer {
                 ip: IpAddr::from_str(&root_ip).unwrap(),
@@ -49,7 +50,8 @@ async fn main() {
             root_id,
         ));
     }
-
+    let node_id = args.node_id;
+    let public_ip = IpAddr::from_str(&args.public_ip).expect("Invalid ip address provided");
     let sock = TcpListener::bind("0.0.0.0:0").await.unwrap();
 
     let local_addr = sock.local_addr().unwrap();
@@ -58,6 +60,7 @@ async fn main() {
     let port = local_addr.port();
     println!("IP: {}, Port: {}", ip_string, port);
     let app_state = Arc::new(AppState::init(
+        public_ip,
         node_id,
         Peer { ip, port },
         Arc::new(Mutex::new(KnownPeers {
