@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::println;
 use std::{
     env,
@@ -11,6 +11,8 @@ use tokio::net::TcpListener;
 
 use crate::http::rocket_server;
 use crate::types::app_state::AppState;
+use crate::types::chain::Chain;
+use crate::types::known_peers::KnownPeers;
 use crate::types::peer::Peer;
 
 mod http;
@@ -36,10 +38,16 @@ async fn main() {
     if args_vec.len() >= 3 {
         let root_ip = args_vec[1].clone();
         let root_port = args_vec[2].parse::<u16>().unwrap();
-        root_peer_info = Some(Peer {
-            ip: IpAddr::from_str(&root_ip).unwrap(),
-            port: root_port,
-        });
+        let root_id = args_vec[3]
+            .parse::<String>()
+            .unwrap_or_else(|_| "node_0".into());
+        root_peer_info = Some((
+            Peer {
+                ip: IpAddr::from_str(&root_ip).unwrap(),
+                port: root_port,
+            },
+            root_id,
+        ));
     }
 
     let sock = TcpListener::bind("0.0.0.0:0").await.unwrap();
@@ -52,22 +60,19 @@ async fn main() {
     let app_state = Arc::new(AppState::init(
         node_id,
         Peer { ip, port },
-        Arc::new(Mutex::new(vec![])),
-        Arc::new(Mutex::new(vec![])),
+        Arc::new(Mutex::new(KnownPeers {
+            id_map: HashMap::new(),
+            peers: vec![],
+        })),
+        Arc::new(Mutex::new(Chain::new())),
         Arc::new(Mutex::new(HashSet::new())),
     ));
 
-    // let app_state_mining = app_state.clone();
-    // tokio::spawn(async move {
-    //     loop {
-    //         app_state_mining.mine_random_block().await;
-    //     }
-    // });
-
     let app_state_peer_discovery = app_state.clone();
     if !root_peer_info.is_none() {
+        let (root_peer, root_id) = root_peer_info.unwrap();
         let r = app_state_peer_discovery
-            .root_peer_discovery(root_peer_info.unwrap())
+            .root_peer_discovery(root_peer, &root_id)
             .await;
         if r.is_err() {
             println!(

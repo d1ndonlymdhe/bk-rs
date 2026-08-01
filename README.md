@@ -64,17 +64,29 @@ cargo run -- node0
 ```
 
 The node prints the TCP address it bound for peer traffic, e.g. `IP: 127.0.0.1, Port: 54321`.
-Start additional peers pointing at that address:
+Start additional peers pointing at that address, passing the root's node id as the fourth
+argument:
 
 ```bash
-cargo run -- node1 127.0.0.1 54321
+cargo run -- node1 127.0.0.1 54321 node0
 ```
 
-Or launch a whole local cluster at once:
+Or launch a whole local cluster at once (spins up 1 root + N-1 peers, wiring the root id/IP/port
+through automatically):
 
 ```bash
 python3 launch_nodes.py 5
 ```
+
+`launch_nodes.py` options:
+
+| Flag | Description |
+|------|-------------|
+| `n` (positional) | Total number of nodes to launch, including the root |
+| `--node-prefix` | Node name prefix, e.g. `node` for `node0`, `node1`, ... (default: `node`) |
+| `--delay-min` / `--delay-max` | Random delay range (seconds) between launching successive peers |
+| `--connect-ip` | IP peers use to reach the root node (default: `0.0.0.0`) |
+| `-b`, `--binary` | Run the compiled `target/release/bk-rs` binary instead of `cargo run` (requires `cargo build --release` first) |
 
 ## Casting and tallying votes
 

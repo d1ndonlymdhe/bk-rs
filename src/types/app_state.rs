@@ -9,6 +9,8 @@ use crate::{
     randomizer::mine_block,
     types::{
         block::{Block, Candidate},
+        chain::{Chain, ValidateChainRes},
+        known_peers::KnownPeers,
         mining_pool::MiningPool,
         mining_task::MiningTask,
         network_message::{NetworkMessageReq, NetworkMessageRes},
@@ -22,8 +24,8 @@ use crate::{
 
 pub struct AppState {
     self_as_peer: Peer,
-    known_peers: Arc<Mutex<Vec<Peer>>>,
-    chain: Arc<Mutex<Vec<Block>>>,
+    known_peers: Arc<Mutex<KnownPeers>>,
+    chain: Arc<Mutex<Chain>>,
     seen_voter_ids: Arc<Mutex<HashSet<String>>>,
     node_id: String,
     mining_pool: Arc<Mutex<MiningPool>>,
@@ -37,8 +39,8 @@ impl AppState {
     pub fn init(
         node_id: String,
         self_as_peer: Peer,
-        known_peers: Arc<Mutex<Vec<Peer>>>,
-        chain: Arc<Mutex<Vec<Block>>>,
+        known_peers: Arc<Mutex<KnownPeers>>,
+        chain: Arc<Mutex<Chain>>,
         seen_voter_ids: Arc<Mutex<HashSet<String>>>,
     ) -> Self {
         return Self {
@@ -67,7 +69,7 @@ impl AppState {
 
     pub async fn get_known_peers(&self) -> Vec<Peer> {
         let peers = self.known_peers.lock().unwrap();
-        return peers.clone();
+        return peers.peers.clone();
     }
 
     pub async fn add_mining_task(&self, mining_task: MiningTask) {
@@ -144,11 +146,15 @@ impl AppState {
 
             let (last_block, len) = {
                 let chain_lock = self.chain.lock().unwrap();
-                (chain_lock.clone().into_iter().last(), chain_lock.len())
+                (chain_lock.last().cloned(), chain_lock.len())
             };
 
             let block = tokio::task::spawn_blocking(move || {
-                mine_block(&task, last_block.as_ref(), if len > 0 { len - 1 } else { 0 })
+                mine_block(
+                    &task,
+                    last_block.as_ref(),
+                    if len > 0 { len - 1 } else { 0 },
+                )
             })
             .await;
 
@@ -176,23 +182,24 @@ impl AppState {
         drop(mining_guard);
     }
 
-    pub async fn root_peer_discovery(&self, root_peer: Peer) -> Result<(), String> {
+    pub async fn root_peer_discovery(&self, root_peer: Peer, peer_id: &str) -> Result<(), String> {
         let peers = self.get_known_peers().await;
         if !peer_exists(&peers, &root_peer) {
-            self.add_peer_serializable(root_peer).await;
+            self.add_peer_serializable(root_peer, peer_id.to_string())
+                .await;
         }
         let stream = open_stream(&root_peer).await;
         if let Ok(mut stream) = stream {
             let res = send_packet_and_wait(
                 &mut stream,
-                NetworkMessageReq::PeerDiscoveryReq(self.self_as_peer),
+                NetworkMessageReq::PeerDiscoveryReq((self.self_as_peer, self.node_id.clone())),
             )
             .await;
             return match res {
                 Ok(res) => match res {
                     NetworkMessageRes::PeerDiscoveryRes(res) => {
-                        for peer in res {
-                            self.add_peer_serializable(peer).await;
+                        for (peer, id) in res {
+                            self.add_peer_serializable(peer, id).await;
                         }
                         return Ok(());
                     }
@@ -223,33 +230,36 @@ impl AppState {
         let req = wincode::deserialize::<NetworkMessageReq>(&buff);
         if let Ok(req) = req {
             match req {
-                NetworkMessageReq::PeerDiscoveryReq(peer_serializable) => {
+                NetworkMessageReq::PeerDiscoveryReq((peer_serializable, id)) => {
                     println!("Received peer discovery request");
                     let peer = peer_serializable;
                     let peer_added = {
                         let mut known_peers_lock = self.known_peers.lock().unwrap();
-                        if peer != self.self_as_peer && !peer_exists(&known_peers_lock, &peer) {
-                            known_peers_lock.push(peer);
+                        if peer != self.self_as_peer && !peer_exists(&known_peers_lock.peers, &peer)
+                        {
+                            known_peers_lock.add_peer(peer, id);
                             true
                         } else {
                             false
                         }
                     };
-                    let known_peers = self.get_known_peers().await;
-                    let _r = send_packet_res(
-                        stream,
-                        NetworkMessageRes::PeerDiscoveryRes(known_peers),
-                    )
-                    .await;
+                    let mut entries = vec![];
+                    {
+                        let known_peers_lock = self.known_peers.lock().unwrap();
+                        entries = known_peers_lock.as_entries();
+                    }
+
+                    let _r =
+                        send_packet_res(stream, NetworkMessageRes::PeerDiscoveryRes(entries)).await;
 
                     self.push_peer_sync().await;
                     if peer_added {
                         self.save_chain().await;
                     }
                 }
-                NetworkMessageReq::PushChainReq(chain) => {
+                NetworkMessageReq::PushChainReq((chain, sender_node_id, already_sent)) => {
                     println!("Received chain sync");
-                    self.sync_chain(chain).await;
+                    self.sync_chain(chain, sender_node_id, already_sent).await;
                 }
                 NetworkMessageReq::PushPeersReq(peers) => {
                     self.add_multiple_peer(&peers).await;
@@ -264,14 +274,14 @@ impl AppState {
         }
     }
 
-    pub async fn add_peer_serializable(&self, peer: Peer) {
+    pub async fn add_peer_serializable(&self, peer: Peer, id: String) {
         if peer == self.self_as_peer {
             return;
         }
         let added = {
             let mut known_peers_lock = self.known_peers.lock().unwrap();
-            if !peer_exists(&known_peers_lock, &peer) {
-                known_peers_lock.push(peer);
+            if !peer_exists(&known_peers_lock.peers, &peer) {
+                known_peers_lock.add_peer(peer, id);
                 true
             } else {
                 false
@@ -283,12 +293,13 @@ impl AppState {
         }
     }
 
-    pub async fn sync_chain(&self, new_chain: Vec<Block>) {
+    pub async fn sync_chain(&self, new_chain: Vec<Block>, sender_node_id: String, already_sent: Vec<String>) {
         let new_len = new_chain.len();
         let outcome = {
             let mut chain_lock = self.chain.lock().unwrap();
             let mut seen_voter_ids_lock = self.seen_voter_ids.lock().unwrap();
-            let validation_result = Self::validate_chain(&new_chain, &chain_lock);
+            let mut known_peers_lock = self.known_peers.lock().unwrap();
+            let validation_result = Chain::validate(&new_chain, &chain_lock);
             let current_len = chain_lock.len();
             match validation_result {
                 Ok(()) => {
@@ -300,19 +311,36 @@ impl AppState {
                         votes_cache.record_vote(node.voter_id.clone(), node.data);
                     }
                     chain_lock.extend(new_chain);
-                    Ok((current_len, votes_cache))
+                    let chain_hash = chain_lock.hash();
+                    known_peers_lock.update_chain_hash( &sender_node_id,chain_hash.clone());
+                    Ok((current_len, votes_cache, chain_hash))
                 }
                 Err(reason) => Err((current_len, reason)),
             }
         };
         match outcome {
-            Ok((current_len, votes_cache)) => {
+            Ok((current_len, votes_cache, chain_hash)) => {
                 *self.votes_cache.lock().unwrap() = votes_cache;
                 println!(
                     "ACCEPTED chain from peer: {} blocks (previous: {} blocks)",
                     new_len, current_len
                 );
-                self.push_chain_sync().await;
+                let mut peers_to_ignore = vec![];
+                {
+                    let known_peers_lock = self.known_peers.lock().unwrap();
+                    let known_peers = known_peers_lock.as_entries_with_hash();
+                    peers_to_ignore = known_peers
+                        .iter()
+                        .filter(|(_, _, hash)| *hash == chain_hash)
+                        .map(|(_, id, _)| id.clone())
+                        .collect();
+                }
+                {
+                    let mut known_peers_lock = self.known_peers.lock().unwrap();
+                    known_peers_lock.update_chain_hash_all(chain_hash);
+                }
+                peers_to_ignore.extend(already_sent);
+                self.push_chain_sync(&peers_to_ignore).await;
                 self.save_chain().await;
             }
             Err((current_len, reason)) => {
@@ -328,7 +356,7 @@ impl AppState {
         let (result, added_vote) = {
             let mut chain_lock = self.chain.lock().unwrap();
             let mut seen_voter_ids = self.seen_voter_ids.lock().unwrap();
-            let result = Self::validate_chain_addition(&seen_voter_ids, &chain_lock, &block);
+            let result = Chain::validate_addition(&seen_voter_ids, &chain_lock, &block);
             let mut added_vote = None;
             match result {
                 ValidateChainRes::AddBlock => {
@@ -346,23 +374,28 @@ impl AppState {
             (result, added_vote)
         };
         if let Some((voter_id, candidate)) = added_vote {
-            self.votes_cache.lock().unwrap().record_vote(voter_id, candidate);
-            self.push_chain_sync().await;
+            self.votes_cache
+                .lock()
+                .unwrap()
+                .record_vote(voter_id, candidate);
+            // When new block is mined no peer has it so we can ignore this parameter
+            self.push_chain_sync(&vec![]).await;
             self.save_chain().await;
         }
         result
     }
 
-    async fn add_multiple_peer(&self, peers: &[Peer]) {
+    // Peer, Id
+    async fn add_multiple_peer(&self, peers: &[(Peer, String)]) {
         let grew = {
             let mut known_peers_lock = self.known_peers.lock().unwrap();
-            let old_len = known_peers_lock.len();
-            for peer in peers {
-                if *peer != self.self_as_peer && !peer_exists(&known_peers_lock, peer) {
-                    known_peers_lock.push(*peer);
+            let old_len = known_peers_lock.peers.len();
+            for (peer, id) in peers {
+                if *peer != self.self_as_peer && !peer_exists(&known_peers_lock.peers, &peer) {
+                    known_peers_lock.add_peer(*peer, id.clone());
                 }
             }
-            known_peers_lock.len() > old_len
+            known_peers_lock.peers.len() > old_len
         };
         if grew {
             self.push_peer_sync().await;
@@ -370,117 +403,25 @@ impl AppState {
         }
     }
 
-    fn validate_chain(new_blocks: &[Block], current_chain: &[Block]) -> Result<(), String> {
-        if new_blocks.len() < current_chain.len() {
-            return Err(format!(
-                "new chain ({} blocks) is shorter than current chain ({} blocks)",
-                new_blocks.len(),
-                current_chain.len()
-            ));
-        }
-        if new_blocks.len() == current_chain.len() {
-            let new_last_timestamp = new_blocks.last().map(|b| b.timestamp);
-            let current_last_timestamp = current_chain.last().map(|b| b.timestamp);
-            if new_last_timestamp <= current_last_timestamp {
-                return Err(format!(
-                    "new chain has equal height ({} blocks) but is not newer (new timestamp: {:?}, current timestamp: {:?})",
-                    new_blocks.len(),
-                    new_last_timestamp,
-                    current_last_timestamp
-                ));
-            }
-        }
-        let mut prev_block_hash = new_blocks[0].hash.clone();
-        let mut new_blocks_voter_ids = HashSet::new();
-        for i in 1..new_blocks.len() {
-            if new_blocks[i].prev_hash != prev_block_hash {
-                return Err(format!(
-                    "block {} prev_hash does not match hash of block {}",
-                    i,
-                    i - 1
-                ));
-            }
-            if !Block::validate(&new_blocks[i]) {
-                return Err(format!("block {} failed validation", i));
-            }
-            if !new_blocks_voter_ids.contains(&new_blocks[i].voter_id) {
-                new_blocks_voter_ids.insert(new_blocks[i].voter_id.clone());
-                prev_block_hash = new_blocks[i].hash.clone();
-            } else {
-                return Err(format!(
-                    "block {} has a duplicate voter_id within the new chain",
-                    i
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    // Assumes that the provided chain itself is valid
-    fn validate_chain_addition(
-        seen_voter_ids: &HashSet<String>,
-        current_chain: &[Block],
-        new_block: &Block,
-    ) -> ValidateChainRes {
-        // If already voted ignore
-        if seen_voter_ids.contains(&new_block.voter_id) {
-            return ValidateChainRes::IgnoreBlock;
-        }
-
-        if current_chain.is_empty() {
-            // Only try to add new block if it says it is the first block on the chain
-            if new_block.idx == 0 {
-                if Block::validate(new_block) {
-                    return ValidateChainRes::AddBlock;
-                } else {
-                    return ValidateChainRes::IgnoreBlock;
-                }
-            } else {
-                return ValidateChainRes::IgnoreBlock;
-            }
-        }
-        let last_block = &current_chain[current_chain.len() - 1];
-
-        if new_block.idx <= last_block.idx {
-            // If the block is earlier in the chain ignore the block;
-            return ValidateChainRes::AttemptedLateAdd;
-        }
-
-        // if current chain has blocks only try to add new block if it says it is the next block on the chain
-        if new_block.idx == last_block.idx + 1 {
-            if new_block.prev_hash != last_block.hash {
-                // The chain's tip changed (e.g. replaced wholesale by sync_chain) while this
-                // block was being mined, so it's mining against a stale parent. Retryable, same
-                // as losing the race on idx.
-                return ValidateChainRes::AttemptedLateAdd;
-            } else {
-                if Block::validate(new_block) {
-                    return ValidateChainRes::AddBlock;
-                } else {
-                    return ValidateChainRes::IgnoreBlock;
-                }
-            }
-        } else {
-            return ValidateChainRes::IgnoreBlock;
-        }
-    }
-
     async fn push_peer_sync(&self) {
         let mut join_set = JoinSet::new();
         {
             let known_peers_lock = self.known_peers.lock().unwrap();
-            let peers_list = known_peers_lock.clone();
-            let len = peers_list.len();
+            let peer_entries = known_peers_lock.as_entries();
+            let len = peer_entries.len();
             drop(known_peers_lock);
-
+            let peer_entries = peer_entries.clone();
             for i in 0..len {
-                let peer = peers_list[i].clone();
-                let list = peers_list.clone();
+                let (peer, _id) = peer_entries[i].clone();
+                let peer_entries = peer_entries.clone();
                 join_set.spawn(async move {
                     let stream = open_stream(&peer).await;
                     if let Ok(mut stream) = stream {
-                        let r = send_packet_req(&mut stream, NetworkMessageReq::PushPeersReq(list))
-                            .await;
+                        let r = send_packet_req(
+                            &mut stream,
+                            NetworkMessageReq::PushPeersReq(peer_entries),
+                        )
+                        .await;
                         if let Ok(_) = r {
                             return Ok(peer);
                         } else {
@@ -505,9 +446,7 @@ impl AppState {
             let mut known_peers_lock = self.known_peers.lock().unwrap();
             let mut peer_removed = false;
             for peer in failed_peers {
-                if peer_exists(&known_peers_lock, &peer) {
-                    let idx = known_peers_lock.iter().position(|x| *x == peer).unwrap();
-                    known_peers_lock.remove(idx);
+                if known_peers_lock.remove_peer_with_peer(&peer) {
                     peer_removed = true;
                 }
             }
@@ -518,27 +457,46 @@ impl AppState {
         }
     }
 
-    async fn push_chain_sync(&self) {
+    async fn push_chain_sync(&self, ignore_peers: &[String]) {
         println!("PUSHING CHAIN SYNC");
         let mut join_set = JoinSet::new();
         {
             let known_peers_lock = self.known_peers.lock().unwrap();
             let chain_lock = self.chain.lock().unwrap();
-            let peers_list = known_peers_lock.clone();
-            let chain = chain_lock.clone();
+            let peers_list = known_peers_lock
+                .as_entries()
+                .iter()
+                .filter(|(_, id)| !ignore_peers.contains(id))
+                .map(|v| v.clone())
+                .collect::<Vec<(Peer, String)>>();
+            let chain: Vec<Block> = chain_lock.to_vec();
             let len = peers_list.len();
+            let sent_ids = peers_list
+                .clone()
+                .into_iter()
+                .map(|v| v.1)
+                .collect::<Vec<String>>();
+            let peers_list = peers_list
+                .clone()
+                .into_iter()
+                .map(|v| v.0)
+                .collect::<Vec<Peer>>();
             drop(known_peers_lock);
             drop(chain_lock);
-
+            let node_id = self.node_id.clone();
             for i in 0..len {
                 let peer = peers_list[i].clone();
                 let chain = chain.clone();
+                let node_id = node_id.clone();
+                let sent_ids = sent_ids.clone();
                 join_set.spawn(async move {
                     let stream = open_stream(&peer).await;
                     if let Ok(mut stream) = stream {
-                        let r =
-                            send_packet_req(&mut stream, NetworkMessageReq::PushChainReq(chain))
-                                .await;
+                        let r = send_packet_req(
+                            &mut stream,
+                            NetworkMessageReq::PushChainReq((chain, node_id, sent_ids.clone())),
+                        )
+                        .await;
                         if let Ok(_) = r {
                             return Ok(peer);
                         } else {
@@ -563,9 +521,7 @@ impl AppState {
             let mut known_peers_lock = self.known_peers.lock().unwrap();
             let mut peer_removed = false;
             for peer in failed_peers {
-                if peer_exists(&known_peers_lock, &peer) {
-                    let idx = known_peers_lock.iter().position(|x| *x == peer).unwrap();
-                    known_peers_lock.remove(idx);
+                if known_peers_lock.remove_peer_with_peer(&peer) {
                     peer_removed = true;
                 }
             }
@@ -584,9 +540,10 @@ impl AppState {
             &chain_lock,
             &filename,
             self.self_as_peer.clone(),
-            &known_peers_lock,
+            &known_peers_lock.peers,
         );
         let known_peer_addresses = known_peers_lock
+            .peers
             .iter()
             .map(|peer| format!("{}:{}", peer.ip, peer.port))
             .collect::<Vec<String>>();
@@ -602,11 +559,4 @@ impl AppState {
             println!("Known peers: {}", known_peer_addresses.join(", "));
         }
     }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum ValidateChainRes {
-    IgnoreBlock,
-    AddBlock,
-    AttemptedLateAdd,
 }

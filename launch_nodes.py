@@ -31,6 +31,7 @@ def stream_output(name: str, proc: subprocess.Popen[str], on_line=None) -> None:
 def launch_node(
     work_dir: Path,
     node_name: str,
+    root_id: str,
     root_ip: str | None = None,
     root_port: int | None = None,
     use_binary: bool = False,
@@ -40,7 +41,7 @@ def launch_node(
     else:
         cmd = ["cargo", "run", "--", node_name]
     if root_ip is not None and root_port is not None:
-        cmd.extend([root_ip, str(root_port)])
+        cmd.extend([root_ip, str(root_port), root_id])
 
     proc = subprocess.Popen(
         cmd,
@@ -143,7 +144,7 @@ def main() -> int:
     try:
         root_name = f"{args.node_prefix}0"
         print(f"Launching root: {root_name}")
-        root = launch_node(work_dir, root_name, use_binary=args.binary)
+        root = launch_node(work_dir, root_name, root_name, use_binary=args.binary)
         nodes.append(root)
 
         reported_ip, root_port = wait_for_root_address(root)
@@ -157,7 +158,7 @@ def main() -> int:
 
             node_name = f"{args.node_prefix}{i}"
             print(f"Launching peer: {node_name}")
-            peer = launch_node(work_dir, node_name, args.connect_ip, root_port, args.binary)
+            peer = launch_node(work_dir, node_name,root_name, args.connect_ip, root_port, args.binary)
             nodes.append(peer)
             monitor_node_output(peer)
 
