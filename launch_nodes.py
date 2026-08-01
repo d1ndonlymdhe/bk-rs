@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import random
 import re
 import signal
 import subprocess
@@ -31,17 +30,19 @@ def stream_output(name: str, proc: subprocess.Popen[str], on_line=None) -> None:
 def launch_node(
     work_dir: Path,
     node_name: str,
-    root_id: str,
+    public_ip: str,
+    root_id: str | None = None,
     root_ip: str | None = None,
     root_port: int | None = None,
     use_binary: bool = False,
 ) -> NodeProcess:
     if use_binary:
-        cmd = [str(work_dir / "target" / "release" / "bk-rs"), node_name]
+        cmd = [str(work_dir / "target" / "release" / "bk-rs")]
     else:
-        cmd = ["cargo", "run", "--", node_name]
-    if root_ip is not None and root_port is not None:
-        cmd.extend([root_ip, str(root_port), root_id])
+        cmd = ["cargo", "run", "--"]
+    cmd.extend(["--node-id", node_name, "--public-ip", public_ip])
+    if root_id is not None and root_ip is not None and root_port is not None:
+        cmd.extend(["--root-id", root_id, "--root-ip", root_ip, "--root-port", str(root_port)])
 
     proc = subprocess.Popen(
         cmd,
@@ -112,11 +113,13 @@ def stop_all(nodes: list[NodeProcess]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Launch N bk-rs nodes with staggered delays.")
-    parser.add_argument("n", type=int, help="Total number of nodes to launch (including root)")
+    parser = argparse.ArgumentParser(description="Launch N bk-rs nodes.")
+    parser.add_argument(
+        "n",
+        type=int,
+        help="Total number of nodes to launch (including root, unless --no-root is set)",
+    )
     parser.add_argument("--node-prefix", default="node", help="Node name prefix (default: node)")
-    parser.add_argument("--delay-min", type=float, default=5.0, help="Minimum delay between launches in seconds")
-    parser.add_argument("--delay-max", type=float, default=10.0, help="Maximum delay between launches in seconds")
     parser.add_argument(
         "--connect-ip",
         default="0.0.0.0",
@@ -128,37 +131,79 @@ def main() -> int:
         action="store_true",
         help="Use compiled release binary at target/release/bk-rs instead of cargo run",
     )
+    parser.add_argument(
+        "-p",
+        "--public-ip",
+        default="0.0.0.0",
+        help="Public IP address for the node (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "-nr",
+        "--no-root",
+        action="store_true",
+        help=(
+            "Do not launch a local root node; instead connect all launched nodes "
+            "to an already-running external root node. Requires --root-port and "
+            "--root-id, with --connect-ip set to the external root's IP."
+        ),
+    )
+    parser.add_argument(
+        "--root-port",
+        type=int,
+        default=None,
+        help="Port of the external root node to connect to (required with --no-root)",
+    )
+    parser.add_argument(
+        "--root-id",
+        default="node_0",
+        help="Identifier of the external root node to connect to (used with --no-root, default: node_0)",
+    )
+
     args = parser.parse_args()
 
     if args.n < 1:
         print("n must be >= 1", file=sys.stderr)
         return 1
 
-    if args.delay_min < 0 or args.delay_max < 0 or args.delay_min > args.delay_max:
-        print("Invalid delay range", file=sys.stderr)
-        return 1
+    if args.no_root:
+        if args.root_port is None:
+            print("--root-port is required when --no-root is set", file=sys.stderr)
+            return 1
+        if not (0 < args.root_port < 65536):
+            print("--root-port must be between 1 and 65535", file=sys.stderr)
+            return 1
+        if not args.root_id:
+            print("--root-id must not be empty when --no-root is set", file=sys.stderr)
+            return 1
+        if not args.connect_ip:
+            print("--connect-ip must be set to the external root's IP when --no-root is set", file=sys.stderr)
+            return 1
 
     work_dir = Path(__file__).resolve().parent
     nodes: list[NodeProcess] = []
 
     try:
-        root_name = f"{args.node_prefix}0"
-        print(f"Launching root: {root_name}")
-        root = launch_node(work_dir, root_name, root_name, use_binary=args.binary)
-        nodes.append(root)
+        if args.no_root:
+            root_id = args.root_id
+            root_port = args.root_port
+            print(f"Skipping local root launch. Connecting to external root: IP={args.connect_ip}, Port={root_port}, ID={root_id}")
+            start = 0
+        else:
+            root_name = f"{args.node_prefix}0"
+            print(f"Launching root: {root_name}")
+            root = launch_node(work_dir, root_name, args.public_ip, use_binary=args.binary)
+            nodes.append(root)
 
-        reported_ip, root_port = wait_for_root_address(root)
-        print(f"Root reported IP={reported_ip}, Port={root_port}")
-        print(f"Peers will connect via IP={args.connect_ip}, Port={root_port}")
+            reported_ip, root_port = wait_for_root_address(root)
+            print(f"Root reported IP={reported_ip}, Port={root_port}")
+            print(f"Peers will connect via IP={args.connect_ip}, Port={root_port}")
+            root_id = root_name
+            start = 1
 
-        for i in range(1, args.n):
-            delay = random.uniform(args.delay_min, args.delay_max)
-            print(f"Waiting {delay:.1f}s before launching next node...")
-            time.sleep(1)
-
+        for i in range(start, args.n):
             node_name = f"{args.node_prefix}{i}"
             print(f"Launching peer: {node_name}")
-            peer = launch_node(work_dir, node_name,root_name, args.connect_ip, root_port, args.binary)
+            peer = launch_node(work_dir, node_name, args.public_ip, root_id, args.connect_ip, root_port, args.binary)
             nodes.append(peer)
             monitor_node_output(peer)
 

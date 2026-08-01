@@ -57,7 +57,19 @@ def main():
         default="votes_record.jsonl",
         help="File written by vote.py containing cast votes",
     )
-    parser.add_argument("--host", default="localhost:8000", help="Root node host:port")
+    parser.add_argument(
+        "--root-ip",
+        default="0.0.0.0",
+        help="IP address of the root node's HTTP server (default: 0.0.0.0, matching the "
+        "--public-ip default in the Rust node)",
+    )
+    parser.add_argument(
+        "--root-port",
+        type=int,
+        default=8000,
+        help="Port of the root node's HTTP server (default: 8000, the Rocket server's fixed "
+        "port; this is not the P2P --public-port used between nodes)",
+    )
     parser.add_argument(
         "--timeout",
         type=float,
@@ -68,13 +80,15 @@ def main():
 
     args = parser.parse_args()
 
+    host = f"{args.root_ip}:{args.root_port}"
+
     records = read_records(args.records)
     expected_tally = {}
     for record in records:
         expected_tally[record["vote"]] = expected_tally.get(record["vote"], 0) + 1
 
     print(f"Loaded {len(records)} recorded votes from {args.records}")
-    total = wait_for_total(args.host, len(records), args.timeout, args.poll_interval)
+    total = wait_for_total(host, len(records), args.timeout, args.poll_interval)
 
     print(f"Server reports {total} total votes (expected {len(records)})")
 
@@ -86,7 +100,7 @@ def main():
     for record in records:
         voter_id = record["voter_id"]
         expected_vote = record["vote"]
-        actual = get_vote(args.host, voter_id)
+        actual = get_vote(host, voter_id)
         if actual == "NOT_FOUND":
             not_found.append(voter_id)
         elif actual == expected_vote:
@@ -103,7 +117,7 @@ def main():
         print(f"    - {voter_id}: expected {expected_vote}, got {actual}")
 
     print("\nTally comparison:")
-    actual_tally = get_tally(args.host)
+    actual_tally = get_tally(host)
     candidates = sorted(set(expected_tally) | set(actual_tally))
     ok = True
     for candidate in candidates:

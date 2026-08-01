@@ -23,17 +23,35 @@ mod peer;
 
 #[derive(Parser)]
 struct Args {
-    #[arg(long, default_value = "node_0")]
+    #[arg(
+        long,
+        default_value = "node_0",
+        help = "Required, Identifier for this node"
+    )]
     node_id: String,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "IP address of the root node, if left out the current node will run as root node"
+    )]
     root_ip: Option<String>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Port of the root node, if left out the current node will run as root node"
+    )]
     root_port: Option<u16>,
-    #[arg(long, default_value = "node_0")]
+    #[arg(
+        long,
+        default_value = "node_0",
+        help = "Identifier for the root node, if left out the current node will run as root node"
+    )]
     root_id: Option<String>,
-    #[arg(long)]
+    #[arg(
+        long,
+        default_value = "0.0.0.0",
+        help = "Required, Public IP address for the node"
+    )]
     public_ip: String,
-    #[arg(long, default_value = "4567")]
+    #[arg(long, default_value = "4567", help = "Port for the node")]
     public_port: u16,
 }
 
