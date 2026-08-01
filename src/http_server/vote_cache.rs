@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use crate::types::block::Candidate;
+use crate::block::block::Candidate;
+
 
 // Keeps voter_id -> vote and per-candidate tallies so lookups don't require
 // scanning the chain. Rebuilt/updated whenever the chain changes.

@@ -1,24 +1,25 @@
 use std::collections::{HashMap, HashSet};
 use std::println;
 use std::{
-    env,
     net::IpAddr,
     str::FromStr,
     sync::{Arc, Mutex},
 };
 
-use crate::http::rocket_server;
-use crate::types::app_state::AppState;
-use crate::types::chain::Chain;
-use crate::types::known_peers::KnownPeers;
-use crate::types::peer::Peer;
+use crate::app::App;
+use crate::block::chain::Chain;
+use crate::http_server::http::rocket_server;
+use crate::peer::known_peers::KnownPeers;
+use crate::peer::peer::Peer;
 use clap::Parser;
 use tokio::net::TcpListener;
+use tokio::select;
 
-mod http;
-mod randomizer;
-mod types;
-mod utils;
+mod app;
+mod block;
+mod http_server;
+mod net;
+mod peer;
 
 #[derive(Parser)]
 struct Args {
@@ -28,10 +29,12 @@ struct Args {
     root_ip: Option<String>,
     #[arg(long)]
     root_port: Option<u16>,
-    #[arg(long)]
+    #[arg(long, default_value = "node_0")]
     root_id: Option<String>,
     #[arg(long)]
     public_ip: String,
+    #[arg(long, default_value = "4567")]
+    public_port: u16,
 }
 
 #[tokio::main]
@@ -52,14 +55,15 @@ async fn main() {
     }
     let node_id = args.node_id;
     let public_ip = IpAddr::from_str(&args.public_ip).expect("Invalid ip address provided");
-    let sock = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let bind_string = format!("{}:{}", &args.public_ip, &args.public_port);
+    let sock = TcpListener::bind(&bind_string).await.unwrap();
 
     let local_addr = sock.local_addr().unwrap();
     let ip = local_addr.ip();
     let ip_string = ip.to_string();
     let port = local_addr.port();
     println!("IP: {}, Port: {}", ip_string, port);
-    let app_state = Arc::new(AppState::init(
+    let app_state = Arc::new(App::init(
         public_ip,
         node_id,
         Peer { ip, port },
@@ -92,11 +96,21 @@ async fn main() {
     println!("Starting server process");
 
     let app_state_server_process = app_state.clone();
-    loop {
-        let (mut stream, _peer_addr) = sock.accept().await.unwrap();
-        let binding = app_state_server_process.clone();
-        tokio::spawn(async move {
-            binding.server_process(&mut stream).await;
-        });
+
+    let ctrl_c = tokio::signal::ctrl_c();
+
+    select! {
+        _ = async {
+            loop {
+                let (mut stream, _peer_addr) = sock.accept().await.unwrap();
+                let binding = app_state_server_process.clone();
+                tokio::spawn(async move {
+                    binding.server_process(&mut stream).await;
+                });
+            }
+        } => {}
+        _ = ctrl_c => {
+            println!("Received Ctrl+C, shutting down...");
+        }
     }
 }

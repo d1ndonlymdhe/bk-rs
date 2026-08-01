@@ -1,6 +1,8 @@
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::types::{block::Block, mining_task::MiningTask, peer::Peer};
+use crate::{
+    block::{block::Block, miner::MiningTask}, peer::peer::Peer,
+};
 
 #[derive(SchemaWrite, SchemaRead)]
 pub enum NetworkMessageReq {

@@ -3,15 +3,16 @@ use std::{eprintln, sync::Arc};
 use rocket::State;
 
 use crate::{
-    types::{
-        app_state::AppState, block::Candidate, mining_task::MiningTask,
+    app::App,
+    block::{block::Candidate, miner::MiningTask},
+    net::{
         network_message::NetworkMessageReq,
+        utils::{open_stream, send_packet_req},
     },
-    utils::{open_stream, send_packet_req},
 };
 
 // Starts a web server on port 8000
-pub async fn rocket_server(app_state: Arc<AppState>) {
+pub async fn rocket_server(app_state: Arc<App>) {
     let r = rocket::build()
         .mount(
             "/",
@@ -26,7 +27,7 @@ pub async fn rocket_server(app_state: Arc<AppState>) {
 }
 
 #[rocket::post("/add_vote/<voter_id>/<vote>")]
-async fn add_vote(app_state: &State<Arc<AppState>>, voter_id: &str, vote: Candidate) -> String {
+async fn add_vote(app_state: &State<Arc<App>>, voter_id: &str, vote: Candidate) -> String {
     let app_state = app_state.inner();
     let vote_task = MiningTask {
         voter_id: voter_id.to_string(),
@@ -43,7 +44,7 @@ async fn add_vote(app_state: &State<Arc<AppState>>, voter_id: &str, vote: Candid
 }
 
 #[rocket::get("/vote/<voter_id>")]
-async fn get_vote(app_state: &State<Arc<AppState>>, voter_id: &str) -> String {
+async fn get_vote(app_state: &State<Arc<App>>, voter_id: &str) -> String {
     let app_state = app_state.inner();
     match app_state.get_vote(voter_id).await {
         Some(candidate) => candidate.into(),
@@ -52,13 +53,13 @@ async fn get_vote(app_state: &State<Arc<AppState>>, voter_id: &str) -> String {
 }
 
 #[rocket::get("/votes/total")]
-async fn get_total_votes(app_state: &State<Arc<AppState>>) -> String {
+async fn get_total_votes(app_state: &State<Arc<App>>) -> String {
     let app_state = app_state.inner();
     app_state.get_total_votes().await.to_string()
 }
 
 #[rocket::get("/votes/tally")]
-async fn get_tally(app_state: &State<Arc<AppState>>) -> String {
+async fn get_tally(app_state: &State<Arc<App>>) -> String {
     let app_state = app_state.inner();
     let mut lines = app_state
         .get_tally()
@@ -75,7 +76,7 @@ async fn get_tally(app_state: &State<Arc<AppState>>) -> String {
 
 const DISTRIBUTE_MAX_ATTEMPTS: usize = 3;
 
-async fn distribute_vote_task(app_state: Arc<AppState>, task: &MiningTask) {
+async fn distribute_vote_task(app_state: Arc<App>, task: &MiningTask) {
     let known_peers = app_state.get_known_peers().await;
     if known_peers.len() == 0 {
         eprintln!("No known peers to distribute mining task to");

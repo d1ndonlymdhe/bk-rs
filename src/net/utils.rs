@@ -7,10 +7,10 @@ use tokio::{
     time::Sleep,
 };
 
-use crate::types::{
-    block::Block,
-    network_message::{NetworkMessageReq, NetworkMessageRes},
-    peer::Peer,
+use crate::{
+    block::block::Block,
+    net::network_message::{NetworkMessageReq, NetworkMessageRes},
+    peer::peer::Peer,
 };
 
 pub async fn send_packet_and_wait(
@@ -22,8 +22,16 @@ pub async fn send_packet_and_wait(
     select! {
         _ = stream.readable() => {
             let mut buff = [0;1024];
-            stream.read(&mut buff).await?;
-            let message = wincode::deserialize::<NetworkMessageRes>(&buff).expect("Error deserializing message");
+            let mut final_buff = Vec::new();
+            loop {
+                let n = stream.read(&mut buff).await?;
+                if n == 0 {
+                    break;
+                }
+                final_buff.extend_from_slice(&buff[..n]);
+                // add a max limit?
+            }
+            let message = wincode::deserialize::<NetworkMessageRes>(&final_buff).expect("Error deserializing message");
             return Ok(message);
         }
         _ = timeout() => {

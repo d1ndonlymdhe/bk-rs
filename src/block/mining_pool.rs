@@ -1,4 +1,5 @@
-use crate::types::mining_task::MiningTask;
+use crate::block::miner::MiningTask;
+
 
 // Simple FIFO-ish queue of pending mining tasks, keyed by voter_id so a voter
 // can never have more than one task queued at once.

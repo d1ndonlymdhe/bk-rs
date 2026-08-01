@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use crate::types::peer::Peer;
+use crate::peer::peer::Peer;
+
 
 pub struct KnownPeers {
     pub peers: Vec<Peer>,

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
-use crate::types::block::Block;
+use crate::block::block::Block;
+
 
 pub struct Chain {
     blocks: Vec<Block>,
