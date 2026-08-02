@@ -51,8 +51,6 @@ struct Args {
         help = "Required, Public IP address for the node"
     )]
     public_ip: String,
-    #[arg(long, default_value = "4567", help = "Port for the node")]
-    public_port: u16,
 }
 
 #[tokio::main]
@@ -73,8 +71,7 @@ async fn main() {
     }
     let node_id = args.node_id;
     let public_ip = IpAddr::from_str(&args.public_ip).expect("Invalid ip address provided");
-    let bind_string = format!("{}:{}", &args.public_ip, &args.public_port);
-    let sock = TcpListener::bind(&bind_string).await.unwrap();
+    let sock = TcpListener::bind("0.0.0.0:0").await.unwrap();
 
     let local_addr = sock.local_addr().unwrap();
     let ip = local_addr.ip();

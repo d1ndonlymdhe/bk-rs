@@ -25,10 +25,10 @@ pub async fn send_packet_and_wait(
             let mut final_buff = Vec::new();
             loop {
                 let n = stream.read(&mut buff).await?;
-                if n == 0 {
+                final_buff.extend_from_slice(&buff[..n]);
+                if n < 1024 {
                     break;
                 }
-                final_buff.extend_from_slice(&buff[..n]);
                 // add a max limit?
             }
             let message = wincode::deserialize::<NetworkMessageRes>(&final_buff).expect("Error deserializing message");

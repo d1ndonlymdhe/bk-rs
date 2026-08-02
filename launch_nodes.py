@@ -201,6 +201,8 @@ def main() -> int:
             start = 1
 
         for i in range(start, args.n):
+            if i > start:
+                time.sleep(2)
             node_name = f"{args.node_prefix}{i}"
             print(f"Launching peer: {node_name}")
             peer = launch_node(work_dir, node_name, args.public_ip, root_id, args.connect_ip, root_port, args.binary)

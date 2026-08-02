@@ -80,10 +80,12 @@ cargo build --release
 | `--root-port` | *(none)* | Port of the root node to join; omit to run as root |
 | `--root-id` | `node_0` | Identifier of the root node to join |
 | `--public-ip` | `0.0.0.0` | Public IP address for this node |
-| `--public-port` | `4567` | TCP port for peer traffic |
 
 A node only attempts to join an existing network when `--root-ip` and `--root-port` are both
-given; otherwise it starts as root and launches the Rocket HTTP server on port 8000.
+given; otherwise it starts as root and launches the Rocket HTTP server on port 8000. There's no
+flag to choose the P2P port: every node binds `0.0.0.0:0` and lets the OS assign a free port,
+which it reports on startup (and which is what other nodes should be pointed at via `--root-port`)
+- this avoids port collisions when running multiple nodes on one machine.
 
 Start a root node:
 
@@ -136,8 +138,8 @@ python3 tally.py --timeout 30      # wait for propagation, verify each vote, com
 ```
 
 Both scripts take `--root-ip` (default `0.0.0.0`) and `--root-port` (default `8000`) to point at a
-root node running elsewhere — note `--root-port` here is the HTTP port, not the P2P
-`--public-port` used between nodes.
+root node running elsewhere — note `--root-port` here is the HTTP port, not the P2P port used
+between nodes (which the OS assigns automatically and has no fixed default).
 
 ### HTTP API (root peer)
 

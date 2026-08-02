@@ -8,11 +8,22 @@ use tokio::{io::AsyncReadExt, net::TcpStream, task::JoinSet};
 
 use crate::{
     block::{
-        block::{Block, Candidate}, chain::{Chain, ValidateChainRes}, miner::{MiningTask, mine_block}, mining_pool::MiningPool,
-    }, http_server::vote_cache::VoteCache, net::{network_message::{NetworkMessageReq, NetworkMessageRes}, utils::{open_stream, save_chain_to_file, send_packet_and_wait, send_packet_req, send_packet_res}}, peer::{
+        block::{Block, Candidate},
+        chain::{Chain, ValidateChainRes},
+        miner::{MiningTask, mine_block},
+        mining_pool::MiningPool,
+    },
+    http_server::vote_cache::VoteCache,
+    net::{
+        network_message::{NetworkMessageReq, NetworkMessageRes},
+        utils::{
+            open_stream, save_chain_to_file, send_packet_and_wait, send_packet_req, send_packet_res,
+        },
+    },
+    peer::{
         known_peers::KnownPeers,
         peer::{Peer, peer_exists},
-    }
+    },
 };
 
 pub struct App {
@@ -222,10 +233,10 @@ impl App {
         stream.readable().await.unwrap();
         loop {
             let bytes_read = stream.read(&mut buff).await.unwrap();
-            if bytes_read == 0 {
+            final_buff.extend_from_slice(&buff[..bytes_read]);
+            if bytes_read < 1024 {
                 break;
             }
-            final_buff.extend_from_slice(&buff[..bytes_read]);
             // set a max limit?
         }
         let buff = &final_buff;

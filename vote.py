@@ -33,7 +33,7 @@ def main():
         type=int,
         default=8000,
         help="Port of the root node's HTTP server (default: 8000, the Rocket server's fixed "
-        "port; this is not the P2P --public-port used between nodes)",
+        "port; this is not the P2P port used between nodes, which the OS assigns automatically)",
     )
     parser.add_argument(
         "--out",
